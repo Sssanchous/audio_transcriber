@@ -1,0 +1,38 @@
+# ОС
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+env/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Секреты
+.env
+.env.*
+*.secret.*
+*.key
+
+# Логи и временное
+*.log
+logs/
+tmp/
+*.bak
+*.swp
+
+# Бэкапы/дампы
+*.sql
+*.dump
