@@ -36,3 +36,17 @@ tmp/
 # Бэкапы/дампы
 *.sql
 *.dump
+# ML models
+models/
+*.safetensors
+*.pt
+*.pth
+*.bin
+
+# audio / converted files
+converted/
+uploads/
+*.wav
+*.mp3
+*.m4a
+*.mp4

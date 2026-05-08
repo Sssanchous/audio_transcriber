@@ -1,0 +1,298 @@
+{
+    "filename": "8ce5429291e4a44d238c46d1fc13aa62.mp3",
+    "language": "ru",
+    "duration": 52.27,
+    "text": "Андрей, привет! Давайте быстро обсудим задачи на эту неделю. Мария, да, давай, что нужно сделать в первую очередь? Андрей, нужно подготовить отчет по проекту до пятницы. Мария, хорошо, отчет я сделаю. Андрей, еще нужно отправить клиенту обновленную презентацию сегодня до шести вечера. Мария, поняла, а кто должен проверить финальную версию? Андрей, финальную версию должен проверить Игорь. Мария, хорошо, когда у нас следующая встреча? Андрей, следующая встреча будет в среду в десять утра. Мария, отлично, тогда я до среды подготовлю все материалы.",
+    "segments": [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "Андрей, привет!"
+        },
+        {
+            "start": 2.0,
+            "end": 5.72,
+            "text": "Давайте быстро обсудим задачи на эту неделю."
+        },
+        {
+            "start": 5.72,
+            "end": 11.36,
+            "text": "Мария, да, давай, что нужно сделать в первую очередь?"
+        },
+        {
+            "start": 11.36,
+            "end": 16.44,
+            "text": "Андрей, нужно подготовить отчет по проекту до пятницы."
+        },
+        {
+            "start": 16.44,
+            "end": 20.12,
+            "text": "Мария, хорошо, отчет я сделаю."
+        },
+        {
+            "start": 20.12,
+            "end": 24.0,
+            "text": "Андрей, еще нужно отправить клиенту обновленную"
+        },
+        {
+            "start": 24.0,
+            "end": 27.4,
+            "text": "презентацию сегодня до шести вечера."
+        },
+        {
+            "start": 27.4,
+            "end": 32.8,
+            "text": "Мария, поняла, а кто должен проверить финальную версию?"
+        },
+        {
+            "start": 32.8,
+            "end": 37.16,
+            "text": "Андрей, финальную версию должен проверить Игорь."
+        },
+        {
+            "start": 37.16,
+            "end": 41.96,
+            "text": "Мария, хорошо, когда у нас следующая встреча?"
+        },
+        {
+            "start": 41.96,
+            "end": 46.8,
+            "text": "Андрей, следующая встреча будет в среду в десять утра."
+        },
+        {
+            "start": 46.8,
+            "end": 51.84,
+            "text": "Мария, отлично, тогда я до среды подготовлю все материалы."
+        }
+    ],
+    "tasks": [
+        {
+            "text": "Мария, да, давай, что нужно сделать в первую очередь?",
+            "start": 5.72,
+            "end": 11.36,
+            "timecode": "5.72 - 11.36 сек.",
+            "responsible": "Мария",
+            "all_responsibles": [
+                "Мария"
+            ],
+            "deadline": null,
+            "all_deadlines": [],
+            "triggers": [
+                "\\bнужно\\b",
+                "\\bсделать\\b",
+                "\\bнужно сделать\\b"
+            ],
+            "rubert_scores": {
+                "task": 0.5714,
+                "question": 0.6155,
+                "answer": 0.5981
+            },
+            "confidence": 0.6314,
+            "status": "new"
+        },
+        {
+            "text": "Андрей, нужно подготовить отчет по проекту до пятницы.",
+            "start": 11.36,
+            "end": 16.44,
+            "timecode": "11.36 - 16.44 сек.",
+            "responsible": "Андрей",
+            "all_responsibles": [
+                "Андрей"
+            ],
+            "deadline": "до пятницы",
+            "all_deadlines": [
+                "до пятницы"
+            ],
+            "triggers": [
+                "\\bнужно\\b",
+                "\\bподготовить\\b",
+                "\\bнужно подготовить\\b",
+                "\\bдо\\s+пятницы\\b"
+            ],
+            "rubert_scores": {
+                "task": 0.814,
+                "question": 0.6203,
+                "answer": 0.6022
+            },
+            "confidence": 0.99,
+            "status": "new"
+        },
+        {
+            "text": "Андрей, еще нужно отправить клиенту обновленную",
+            "start": 20.12,
+            "end": 24.0,
+            "timecode": "20.12 - 24.00 сек.",
+            "responsible": "Андрей",
+            "all_responsibles": [
+                "Андрей"
+            ],
+            "deadline": null,
+            "all_deadlines": [],
+            "triggers": [
+                "\\bнужно\\b",
+                "\\bотправить\\b"
+            ],
+            "rubert_scores": {
+                "task": 0.7244,
+                "question": 0.6396,
+                "answer": 0.6029
+            },
+            "confidence": 0.8844,
+            "status": "new"
+        },
+        {
+            "text": "Мария, поняла, а кто должен проверить финальную версию?",
+            "start": 27.4,
+            "end": 32.8,
+            "timecode": "27.40 - 32.80 сек.",
+            "responsible": "Мария",
+            "all_responsibles": [
+                "Мария"
+            ],
+            "deadline": null,
+            "all_deadlines": [],
+            "triggers": [
+                "\\bдолжен\\b",
+                "\\bпроверить\\b"
+            ],
+            "rubert_scores": {
+                "task": 0.7142,
+                "question": 0.6854,
+                "answer": 0.6281
+            },
+            "confidence": 0.7742,
+            "status": "new"
+        },
+        {
+            "text": "Андрей, финальную версию должен проверить Игорь.",
+            "start": 32.8,
+            "end": 37.16,
+            "timecode": "32.80 - 37.16 сек.",
+            "responsible": "Андрей",
+            "all_responsibles": [
+                "Андрей",
+                "Игорь"
+            ],
+            "deadline": null,
+            "all_deadlines": [],
+            "triggers": [
+                "\\bдолжен\\b",
+                "\\bпроверить\\b"
+            ],
+            "rubert_scores": {
+                "task": 0.7769,
+                "question": 0.6092,
+                "answer": 0.6508
+            },
+            "confidence": 0.9369,
+            "status": "new"
+        },
+        {
+            "text": "Андрей, следующая встреча будет в среду в десять утра.",
+            "start": 41.96,
+            "end": 46.8,
+            "timecode": "41.96 - 46.80 сек.",
+            "responsible": "Андрей",
+            "all_responsibles": [
+                "Андрей"
+            ],
+            "deadline": null,
+            "all_deadlines": [],
+            "triggers": [],
+            "rubert_scores": {
+                "task": 0.6268,
+                "question": 0.4914,
+                "answer": 0.531
+            },
+            "confidence": 0.6868,
+            "status": "new"
+        }
+    ],
+    "qa_pairs": [
+        {
+            "question": "Мария, да, давай, что нужно сделать в первую очередь?",
+            "answer": "Мария, хорошо, отчет я сделаю.",
+            "question_start": 5.72,
+            "question_end": 11.36,
+            "answer_start": 16.44,
+            "answer_end": 20.12,
+            "question_timecode": "5.72 - 11.36 сек.",
+            "answer_timecode": "16.44 - 20.12 сек.",
+            "question_triggers": [
+                "\\?$",
+                "\\bчто\\b",
+                "?"
+            ],
+            "answer_triggers": [],
+            "question_rubert_scores": {
+                "task": 0.5714,
+                "question": 0.6155,
+                "answer": 0.5981
+            },
+            "answer_rubert_scores": {
+                "task": 0.5936,
+                "question": 0.4975,
+                "answer": 0.7378
+            },
+            "confidence": 0.7378,
+            "status": "linked"
+        },
+        {
+            "question": "Мария, поняла, а кто должен проверить финальную версию?",
+            "answer": "Андрей, финальную версию должен проверить Игорь.",
+            "question_start": 27.4,
+            "question_end": 32.8,
+            "answer_start": 32.8,
+            "answer_end": 37.16,
+            "question_timecode": "27.40 - 32.80 сек.",
+            "answer_timecode": "32.80 - 37.16 сек.",
+            "question_triggers": [
+                "\\?$",
+                "\\bкто\\b",
+                "?"
+            ],
+            "answer_triggers": [],
+            "question_rubert_scores": {
+                "task": 0.7142,
+                "question": 0.6854,
+                "answer": 0.6281
+            },
+            "answer_rubert_scores": {
+                "task": 0.7769,
+                "question": 0.6092,
+                "answer": 0.6508
+            },
+            "confidence": 0.6508,
+            "status": "linked"
+        },
+        {
+            "question": "Мария, хорошо, когда у нас следующая встреча?",
+            "answer": "Мария, отлично, тогда я до среды подготовлю все материалы.",
+            "question_start": 37.16,
+            "question_end": 41.96,
+            "answer_start": 46.8,
+            "answer_end": 51.84,
+            "question_timecode": "37.16 - 41.96 сек.",
+            "answer_timecode": "46.80 - 51.84 сек.",
+            "question_triggers": [
+                "\\?$",
+                "\\bкогда\\b",
+                "?"
+            ],
+            "answer_triggers": [],
+            "question_rubert_scores": {
+                "task": 0.5489,
+                "question": 0.6404,
+                "answer": 0.5487
+            },
+            "answer_rubert_scores": {
+                "task": 0.5993,
+                "question": 0.5473,
+                "answer": 0.5893
+            },
+            "confidence": 0.5893,
+            "status": "linked"
+        }
+    ],
+    "nlp_mode": "RuBERT + Natasha + rules"
+}
