@@ -46,7 +46,12 @@ models/
 # audio / converted files
 converted/
 uploads/
+exports/
+results/
 *.wav
 *.mp3
 *.m4a
 *.mp4
+
+# Frontend build cache
+frontend/node_modules/

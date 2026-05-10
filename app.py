@@ -7,12 +7,16 @@ import re
 import shutil
 import time
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import bcrypt
+import jwt
 import psycopg
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydub import AudioSegment
@@ -86,15 +90,44 @@ for d in [UPLOAD_DIR, CONVERTED_DIR, RESULTS_DIR, EXPORTS_DIR]:
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".opus"}
 
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
+
 app = FastAPI(title="PM Insights")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 app.mount("/exports", StaticFiles(directory=str(EXPORTS_DIR)), name="exports")
 
-whisper_model = WhisperModel(
-    WHISPER_MODEL_NAME,
-    device=WHISPER_DEVICE,
-    compute_type=WHISPER_COMPUTE_TYPE,
-)
+WHISPER_FALLBACK_CHAIN = [WHISPER_MODEL_NAME, "large-v3", "large", "medium", "base"]
+_seen = set()
+WHISPER_FALLBACK_CHAIN = [m for m in WHISPER_FALLBACK_CHAIN if not (m in _seen or _seen.add(m))]
+
+whisper_model = None
+for _model_name in WHISPER_FALLBACK_CHAIN:
+    try:
+        print(f"[whisper] loading model '{_model_name}' (device={WHISPER_DEVICE}, compute={WHISPER_COMPUTE_TYPE})")
+        whisper_model = WhisperModel(
+            _model_name,
+            device=WHISPER_DEVICE,
+            compute_type=WHISPER_COMPUTE_TYPE,
+        )
+        WHISPER_MODEL_NAME = _model_name
+        print(f"[whisper] model '{_model_name}' loaded successfully")
+        break
+    except Exception as e:
+        print(f"[whisper] failed to load '{_model_name}': {e}")
+
+if whisper_model is None:
+    raise RuntimeError("Could not load any Whisper model")
 
 classifier_tokenizer = None
 classifier_model = None
@@ -620,8 +653,19 @@ def init_db() -> None:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS transcriptions (
                 id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
                 filename TEXT NOT NULL,
                 original_path TEXT,
                 converted_path TEXT,
@@ -643,7 +687,79 @@ def init_db() -> None:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_transcriptions_search ON transcriptions USING GIN(search_vector)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_transcriptions_user ON transcriptions (user_id)")
+        cur.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'transcriptions' AND column_name = 'user_id'
+                ) THEN
+                    ALTER TABLE transcriptions ADD COLUMN user_id INTEGER REFERENCES users(id);
+                    CREATE INDEX IF NOT EXISTS idx_transcriptions_user ON transcriptions (user_id);
+                END IF;
+            END $$;
+            """
+        )
         conn.commit()
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def create_token(user_id: int, username: str) -> str:
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Not authenticated")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = decode_token(token)
+        return {"id": payload["sub"], "username": payload["username"]}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token")
+
+
+def create_user(username: str, password: str) -> int:
+    pw_hash = hash_password(password)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id",
+            (username, pw_hash),
+        )
+        uid = cur.fetchone()[0]
+        conn.commit()
+        return uid
+
+
+def authenticate_user(username: str, password: str) -> Optional[dict]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, username, password_hash FROM users WHERE username = %s", (username,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        if not verify_password(password, row[2]):
+            return None
+        return {"id": row[0], "username": row[1]}
 
 
 def update_search_vector(cur, record_id: int) -> None:
@@ -664,9 +780,12 @@ def update_search_vector(cur, record_id: int) -> None:
     )
 
 
-def get_record(record_id: int) -> Optional[dict]:
+def get_record(record_id: int, user_id: Optional[int] = None) -> Optional[dict]:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM transcriptions WHERE id = %s", (record_id,))
+        if user_id is not None:
+            cur.execute("SELECT * FROM transcriptions WHERE id = %s AND user_id = %s", (record_id, user_id))
+        else:
+            cur.execute("SELECT * FROM transcriptions WHERE id = %s", (record_id,))
         row = cur.fetchone()
 
         if not row:
@@ -676,39 +795,66 @@ def get_record(record_id: int) -> Optional[dict]:
         return dict(zip(cols, row))
 
 
-def get_all_records() -> list[dict]:
+def get_all_records(user_id: Optional[int] = None) -> list[dict]:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM transcriptions ORDER BY created_at DESC")
+        if user_id is not None:
+            cur.execute("SELECT * FROM transcriptions WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+        else:
+            cur.execute("SELECT * FROM transcriptions ORDER BY created_at DESC")
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
 
         return [dict(zip(cols, row)) for row in rows]
 
 
-def find_previous_record(current_record_id: int, project_name: str = "") -> Optional[dict]:
+def find_previous_record(current_record_id: int, project_name: str = "", user_id: Optional[int] = None) -> Optional[dict]:
     with get_conn() as conn, conn.cursor() as cur:
         if project_name:
-            cur.execute(
-                """
-                SELECT *
-                FROM transcriptions
-                WHERE id < %s AND project_name = %s
-                ORDER BY meeting_date DESC NULLS LAST, created_at DESC
-                LIMIT 1
-                """,
-                (current_record_id, project_name),
-            )
+            if user_id is not None:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM transcriptions
+                    WHERE id < %s AND project_name = %s AND user_id = %s
+                    ORDER BY meeting_date DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    (current_record_id, project_name, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM transcriptions
+                    WHERE id < %s AND project_name = %s
+                    ORDER BY meeting_date DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    (current_record_id, project_name),
+                )
         else:
-            cur.execute(
-                """
-                SELECT *
-                FROM transcriptions
-                WHERE id < %s
-                ORDER BY meeting_date DESC NULLS LAST, created_at DESC
-                LIMIT 1
-                """,
-                (current_record_id,),
-            )
+            if user_id is not None:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM transcriptions
+                    WHERE id < %s AND user_id = %s
+                    ORDER BY meeting_date DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    (current_record_id, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM transcriptions
+                    WHERE id < %s
+                    ORDER BY meeting_date DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    (current_record_id,),
+                )
 
         row = cur.fetchone()
 
@@ -719,25 +865,44 @@ def find_previous_record(current_record_id: int, project_name: str = "") -> Opti
         return dict(zip(cols, row))
 
 
-def search_records(query: str) -> list[dict]:
+def search_records(query: str, user_id: Optional[int] = None) -> list[dict]:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, filename, project_name, meeting_date, created_at,
-                   ts_headline(
-                       'russian',
-                       full_text,
-                       plainto_tsquery('russian', %s),
-                       'MaxWords=30, MinWords=10, StartSel=<mark>, StopSel=</mark>'
-                   ) AS snippet,
-                   ts_rank(search_vector, plainto_tsquery('russian', %s)) AS rank
-            FROM transcriptions
-            WHERE search_vector @@ plainto_tsquery('russian', %s)
-            ORDER BY rank DESC, created_at DESC
-            LIMIT 30
-            """,
-            (query, query, query),
-        )
+        if user_id is not None:
+            cur.execute(
+                """
+                SELECT id, filename, project_name, meeting_date, created_at,
+                       ts_headline(
+                           'russian',
+                           full_text,
+                           plainto_tsquery('russian', %s),
+                           'MaxWords=30, MinWords=10, StartSel=<mark>, StopSel=</mark>'
+                       ) AS snippet,
+                       ts_rank(search_vector, plainto_tsquery('russian', %s)) AS rank
+                FROM transcriptions
+                WHERE search_vector @@ plainto_tsquery('russian', %s) AND user_id = %s
+                ORDER BY rank DESC, created_at DESC
+                LIMIT 30
+                """,
+                (query, query, query, user_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, filename, project_name, meeting_date, created_at,
+                       ts_headline(
+                           'russian',
+                           full_text,
+                           plainto_tsquery('russian', %s),
+                           'MaxWords=30, MinWords=10, StartSel=<mark>, StopSel=</mark>'
+                       ) AS snippet,
+                       ts_rank(search_vector, plainto_tsquery('russian', %s)) AS rank
+                FROM transcriptions
+                WHERE search_vector @@ plainto_tsquery('russian', %s)
+                ORDER BY rank DESC, created_at DESC
+                LIMIT 30
+                """,
+                (query, query, query),
+            )
 
         return [
             {
@@ -959,11 +1124,13 @@ def store_record(
     project_name: str,
     participants: str,
     timing: dict,
+    user_id: Optional[int] = None,
 ) -> int:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO transcriptions (
+                user_id,
                 filename,
                 original_path,
                 converted_path,
@@ -979,10 +1146,11 @@ def store_record(
                 project_name,
                 participants,
                 timing_json
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
+                user_id,
                 filename,
                 original_path,
                 converted_path,
@@ -1131,6 +1299,28 @@ def export_excel(record_id: int) -> Path:
         dyn_ws.cell(row_idx, 4, item.get("delta", 0))
         row_idx += 1
 
+    trans_ws = wb.create_sheet("Транскрибация")
+    trans_ws.cell(1, 1, "Транскрибация встречи").font = bold
+    full_text = rec.get("full_text") or ""
+    if full_text:
+        trans_ws.cell(2, 1, full_text)
+        trans_ws.column_dimensions["A"].width = 120
+    else:
+        trans_ws.cell(2, 1, "Транскрибация пока недоступна")
+
+    segments = rec.get("segments") or []
+    if segments:
+        seg_ws = wb.create_sheet("Сегменты")
+        seg_headers = ["Время", "Текст", "Тип", "Sentiment", "Confidence"]
+        for i, h in enumerate(seg_headers, 1):
+            seg_ws.cell(1, i, h).font = bold
+        for r, seg in enumerate(segments, 2):
+            seg_ws.cell(r, 1, seg.get("timecode", ""))
+            seg_ws.cell(r, 2, seg.get("text", ""))
+            seg_ws.cell(r, 3, seg.get("predicted_label", "other"))
+            seg_ws.cell(r, 4, seg.get("sentiment_label", "neutral"))
+            seg_ws.cell(r, 5, seg.get("prediction_confidence", 0))
+
     out = EXPORTS_DIR / f"report_{record_id}.xlsx"
     wb.save(out)
 
@@ -1146,13 +1336,11 @@ def export_pdf(record_id: int) -> Path:
     if not rec:
         raise HTTPException(404, "Record not found")
 
-    class PDF(FPDF):
-        pass
-
-    pdf = PDF()
+    pdf = FPDF()
     pdf.add_page()
 
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    W = 190
 
     if Path(font_path).exists():
         pdf.add_font("DejaVu", "", font_path)
@@ -1163,23 +1351,23 @@ def export_pdf(record_id: int) -> Path:
     analytics = rec.get("analytics_json") or {}
     dynamic = analytics.get("dynamic_analysis") or {}
 
-    pdf.multi_cell(0, 8, f"PM Insights — {rec['filename']}")
+    pdf.multi_cell(w=W, h=8, text=f"PM Insights — {str(rec['filename'])}")
     pdf.ln(2)
-    pdf.multi_cell(0, 8, f"Проект: {rec.get('project_name') or ''}")
-    pdf.multi_cell(0, 8, f"Дата: {rec.get('meeting_date') or ''}")
-    pdf.multi_cell(0, 8, f"Участники: {rec.get('participants') or ''}")
-    pdf.multi_cell(0, 8, f"Длительность: {rec.get('duration') or 0} сек")
-    pdf.ln(2)
-
-    pdf.multi_cell(0, 8, "Динамический анализ:")
-    pdf.multi_cell(0, 8, f"Вывод: {dynamic.get('summary', 'Нет данных')}")
-    pdf.multi_cell(0, 8, f"Изменение количества задач: {dynamic.get('tasks_delta', 0)}")
-    pdf.multi_cell(0, 8, f"Изменение количества Q/A: {dynamic.get('qa_delta', 0)}")
-    pdf.multi_cell(0, 8, f"Изменение sentiment: {dynamic.get('sentiment_delta', 0)}")
-    pdf.multi_cell(0, 8, f"Изменение негативной доли: {dynamic.get('negative_ratio_delta', 0)}")
+    pdf.multi_cell(w=W, h=8, text=f"Проект: {str(rec.get('project_name') or '')}")
+    pdf.multi_cell(w=W, h=8, text=f"Дата: {str(rec.get('meeting_date') or '')}")
+    pdf.multi_cell(w=W, h=8, text=f"Участники: {str(rec.get('participants') or '')}")
+    pdf.multi_cell(w=W, h=8, text=f"Длительность: {str(rec.get('duration') or 0)} сек")
     pdf.ln(2)
 
-    pdf.multi_cell(0, 8, "Задачи:")
+    pdf.multi_cell(w=W, h=8, text="Динамический анализ:")
+    pdf.multi_cell(w=W, h=8, text=f"Вывод: {str(dynamic.get('summary', 'Нет данных'))}")
+    pdf.multi_cell(w=W, h=8, text=f"Изменение количества задач: {dynamic.get('tasks_delta', 0)}")
+    pdf.multi_cell(w=W, h=8, text=f"Изменение количества Q/A: {dynamic.get('qa_delta', 0)}")
+    pdf.multi_cell(w=W, h=8, text=f"Изменение sentiment: {dynamic.get('sentiment_delta', 0)}")
+    pdf.multi_cell(w=W, h=8, text=f"Изменение негативной доли: {dynamic.get('negative_ratio_delta', 0)}")
+    pdf.ln(2)
+
+    pdf.multi_cell(w=W, h=8, text="Задачи:")
 
     for i, task in enumerate(rec.get("tasks_json") or [], 1):
         line = (
@@ -1187,7 +1375,23 @@ def export_pdf(record_id: int) -> Path:
             f"Ответственный: {task.get('responsible') or '—'} | "
             f"Срок: {task.get('deadline') or '—'}"
         )
-        pdf.multi_cell(0, 8, line)
+        pdf.multi_cell(w=W, h=8, text=line)
+
+    pdf.ln(4)
+    pdf.multi_cell(w=W, h=8, text="Транскрибация встречи:")
+    pdf.ln(2)
+    full_text = rec.get("full_text") or ""
+    if full_text:
+        if Path(font_path).exists():
+            pdf.set_font("DejaVu", size=9)
+        else:
+            pdf.set_font("Arial", size=9)
+        for paragraph in full_text.split("\n"):
+            if paragraph.strip():
+                pdf.multi_cell(w=W, h=5, text=paragraph.strip())
+                pdf.ln(1)
+    else:
+        pdf.multi_cell(w=W, h=8, text="Транскрибация пока недоступна")
 
     out = EXPORTS_DIR / f"report_{record_id}.pdf"
     pdf.output(str(out))
@@ -1264,6 +1468,243 @@ async def favicon() -> Response:
 async def startup_event() -> None:
     init_db()
 
+
+# ─── JSON API: Auth ───────────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/register")
+async def api_register(body: RegisterRequest):
+    if len(body.username) < 3:
+        raise HTTPException(400, "Username must be at least 3 characters")
+    if len(body.password) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters")
+    try:
+        uid = create_user(body.username, body.password)
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "Username already taken")
+    token = create_token(uid, body.username)
+    return {"token": token, "user": {"id": uid, "username": body.username}}
+
+
+@app.post("/api/auth/login")
+async def api_login(body: LoginRequest):
+    user = authenticate_user(body.username, body.password)
+    if not user:
+        raise HTTPException(401, "Invalid username or password")
+    token = create_token(user["id"], user["username"])
+    return {"token": token, "user": user}
+
+
+@app.get("/api/auth/me")
+async def api_me(user: dict = Depends(get_current_user)):
+    return {"user": user}
+
+
+# ─── JSON API: Records (authenticated) ─────────────────────────────────────
+
+def _serialize_record(rec: dict) -> dict:
+    from datetime import date as _date
+    out = {}
+    for k, v in rec.items():
+        if k == "search_vector":
+            continue
+        if isinstance(v, _date):
+            out[k] = v.isoformat()
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
+@app.get("/api/records")
+async def api_records(user: dict = Depends(get_current_user)):
+    records = get_all_records(user_id=user["id"])
+    return [_serialize_record(r) for r in records]
+
+
+@app.get("/api/records/{record_id}")
+async def api_record_detail(record_id: int, user: dict = Depends(get_current_user)):
+    rec = get_record(record_id, user_id=user["id"])
+    if not rec:
+        raise HTTPException(404, "Record not found")
+    return _serialize_record(rec)
+
+
+@app.post("/api/upload")
+async def api_upload_file(
+    file: UploadFile = File(...),
+    meeting_date: Optional[str] = Form(None),
+    project_name: str = Form(""),
+    participants: str = Form(""),
+    user: dict = Depends(get_current_user),
+):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Only these formats are supported: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
+
+    safe_name = Path(file.filename).name
+    file_hash = hashlib.md5(f"{safe_name}_{time.time()}".encode()).hexdigest()[:12]
+
+    original_path = UPLOAD_DIR / f"{file_hash}_{safe_name}"
+    wav_path = CONVERTED_DIR / f"{file_hash}.wav"
+
+    t0 = time.perf_counter()
+    with original_path.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    t1 = time.perf_counter()
+
+    convert_to_wav(original_path, wav_path)
+    t2 = time.perf_counter()
+
+    transcription = transcribe_audio(wav_path)
+    t3 = time.perf_counter()
+
+    classified, sentiments, tasks, qa_pairs, analytics = process_segments(transcription["segments"])
+    t4 = time.perf_counter()
+
+    enriched_segments = []
+    for seg, cls, sent in zip(transcription["segments"], classified, sentiments):
+        enriched_segments.append({
+            **seg,
+            "predicted_label": cls.get("label", "other"),
+            "prediction_confidence": cls.get("confidence", 0),
+            "prediction_source": cls.get("source", "rules"),
+            "prediction_debug": cls.get("debug", {}),
+            "task_debug": cls.get("task_debug", {}),
+            "sentiment_label": sent.get("label", "neutral"),
+            "sentiment_score": sent.get("score", 0),
+            "timecode": f"[{seg['start']:.2f} - {seg['end']:.2f} сек.]",
+        })
+
+    timing = {
+        "upload": round(t1 - t0, 2),
+        "convert": round(t2 - t1, 2),
+        "transcribe": round(t3 - t2, 2),
+        "nlp": round(t4 - t3, 2),
+        "total": round(t4 - t0, 2),
+    }
+
+    payload = {
+        "filename": safe_name,
+        "project_name": project_name,
+        "participants": participants,
+        "meeting_date": meeting_date,
+        "duration": transcription["duration"],
+        "language": transcription["language"],
+        "full_text": transcription["text"],
+        "segments": enriched_segments,
+        "tasks": tasks,
+        "qa_pairs": qa_pairs,
+        "analytics": analytics,
+        "timing": timing,
+    }
+
+    stem = original_path.stem
+    save_result_files(stem, payload)
+
+    record_id = store_record(
+        filename=safe_name,
+        original_path=str(original_path),
+        converted_path=str(wav_path),
+        transcription={**transcription, "segments": enriched_segments},
+        tasks=tasks,
+        qa_pairs=qa_pairs,
+        sentiments=sentiments,
+        analytics=analytics,
+        meeting_date=meeting_date,
+        project_name=project_name,
+        participants=participants,
+        timing=timing,
+        user_id=user["id"],
+    )
+
+    current_record = get_record(record_id)
+    previous_record = find_previous_record(record_id, project_name, user_id=user["id"])
+
+    if current_record:
+        dynamic_analysis = build_dynamic_analysis(current_record, previous_record)
+        analytics["dynamic_analysis"] = dynamic_analysis
+        payload["analytics"] = analytics
+        save_result_files(stem, payload)
+
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE transcriptions SET analytics_json = %s WHERE id = %s",
+                (Json(analytics), record_id),
+            )
+            conn.commit()
+
+    return {"ok": True, "record_id": record_id}
+
+
+@app.delete("/api/records/{record_id}")
+async def api_delete_record(record_id: int, user: dict = Depends(get_current_user)):
+    rec = get_record(record_id, user_id=user["id"])
+    if not rec:
+        raise HTTPException(404, "Record not found")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM transcriptions WHERE id = %s AND user_id = %s", (record_id, user["id"]))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/search")
+async def api_search(q: str = "", user: dict = Depends(get_current_user)):
+    if not q:
+        return []
+    results = search_records(q, user_id=user["id"])
+    for r in results:
+        if r.get("meeting_date"):
+            r["meeting_date"] = r["meeting_date"].isoformat() if hasattr(r["meeting_date"], "isoformat") else str(r["meeting_date"])
+        if r.get("created_at"):
+            r["created_at"] = r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"])
+    return results
+
+
+@app.get("/api/export/excel/{record_id}")
+async def api_excel_export(record_id: int, user: dict = Depends(get_current_user)):
+    rec = get_record(record_id, user_id=user["id"])
+    if not rec:
+        raise HTTPException(404, "Record not found")
+    path = export_excel(record_id)
+    safe_filename = re.sub(r'[^\w\-.]', '_', rec["filename"])
+    return FileResponse(
+        path,
+        filename=f"report_{safe_filename}.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="report_{safe_filename}.xlsx"'},
+    )
+
+
+@app.get("/api/export/pdf/{record_id}")
+async def api_pdf_export(record_id: int, user: dict = Depends(get_current_user)):
+    rec = get_record(record_id, user_id=user["id"])
+    if not rec:
+        raise HTTPException(404, "Record not found")
+    path = export_pdf(record_id)
+    safe_filename = re.sub(r'[^\w\-.]', '_', rec["filename"])
+    return FileResponse(
+        path,
+        filename=f"report_{safe_filename}.pdf",
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="report_{safe_filename}.pdf"'},
+    )
+
+
+# ─── Legacy HTML pages (kept for backward compatibility) ──────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def home() -> HTMLResponse:
