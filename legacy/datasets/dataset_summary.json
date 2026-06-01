@@ -1,0 +1,23 @@
+{
+  "total": 6067,
+  "train": 4973,
+  "val": 1094,
+  "total_counts": {
+    "task": 291,
+    "question": 704,
+    "answer": 366,
+    "other": 4706
+  },
+  "train_counts": {
+    "other": 3858,
+    "question": 577,
+    "answer": 300,
+    "task": 238
+  },
+  "val_counts": {
+    "other": 848,
+    "question": 127,
+    "answer": 66,
+    "task": 53
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "meeting_id": "demo_pm_meeting",
+  "source_audio": "040cf8733177_33ea1d6095873cb5607789c9040ab0df.mp3",
+  "note": "Demo expert-like task reference for KPI script check. This is not an independent production-grade expert annotation.",
+  "tasks": [
+    {
+      "text": "Анна, подготовить финальный отчет по аналитике до пятницы",
+      "responsible": "Анна",
+      "deadline": "до пятницы"
+    },
+    {
+      "text": "Иван, исправить ошибку авторизации до завтра к 12 часам",
+      "responsible": "Иван",
+      "deadline": "до завтра к 12 часам"
+    },
+    {
+      "text": "Мария, проверить релизную сборку до конца недели",
+      "responsible": "Мария",
+      "deadline": "до конца недели"
+    },
+    {
+      "text": "Анна, обновить раздел с рисками сегодня",
+      "responsible": "Анна",
+      "deadline": "сегодня"
+    },
+    {
+      "text": "Мария, проверить релизную сборку еще раз",
+      "responsible": "Мария",
+      "deadline": null
+    },
+    {
+      "text": "Анна, отправить клиенту обновленную презентацию сегодня до 6 вечера",
+      "responsible": "Анна",
+      "deadline": "сегодня до 6 вечера"
+    },
+    {
+      "text": "Иван, собрать логи по ошибке входа и прислать до завтра",
+      "responsible": "Иван",
+      "deadline": "до завтра"
+    }
+  ]
+}

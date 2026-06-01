@@ -1,0 +1,11 @@
+{
+  "meeting_id": "demo_or_real_meeting_id",
+  "note": "Fill this file manually from review candidates. Use only verified action items.",
+  "tasks": [
+    {
+      "text": "Анна, подготовить финальный отчет до пятницы",
+      "responsible": "Анна",
+      "deadline": "до пятницы"
+    }
+  ]
+}

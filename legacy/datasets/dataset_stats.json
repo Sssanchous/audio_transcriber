@@ -1,0 +1,44 @@
+{
+  "processed_files": 71,
+  "extracted_fragments": 1522,
+  "saved_examples": 216,
+  "dropped_fragments": 1310,
+  "labels": {
+    "question": 25,
+    "decision": 8,
+    "deadline": 13,
+    "responsible": 0,
+    "task": 132,
+    "answer": 0,
+    "sentiment_negative": 0,
+    "sentiment_positive": 19,
+    "aspect": 19,
+    "sentiment_neutral": 0,
+    "other": 0
+  },
+  "dropped_reasons": {
+    "other": 800,
+    "duplicate": 121,
+    "service": 280,
+    "too_short": 105,
+    "read_error": 4
+  },
+  "errors": [
+    {
+      "source_file": "03-03-2026.docx",
+      "error": "Start tag expected, '<' not found, line 1, column 1 (<string>, line 1)"
+    },
+    {
+      "source_file": "10-03-2026.docx",
+      "error": "Start tag expected, '<' not found, line 1, column 1 (<string>, line 1)"
+    },
+    {
+      "source_file": "16-03-2026.docx",
+      "error": "Start tag expected, '<' not found, line 1, column 1 (<string>, line 1)"
+    },
+    {
+      "source_file": "24-02-2026.docx",
+      "error": "Start tag expected, '<' not found, line 1, column 1 (<string>, line 1)"
+    }
+  ]
+}

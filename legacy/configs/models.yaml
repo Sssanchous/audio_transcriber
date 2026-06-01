@@ -1,0 +1,10 @@
+models:
+  asr:
+    current: stub
+    planned:
+      - whisper
+      - vosk
+  topic_modeling:
+    current: rule_based_fallback
+    planned:
+      - bertopic

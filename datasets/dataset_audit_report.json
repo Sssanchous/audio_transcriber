@@ -1,0 +1,35 @@
+{
+  "input": "datasets\\training_dataset.jsonl",
+  "total_before": 3430,
+  "total_after": 3378,
+  "removed_duplicates": 0,
+  "removed_bad_encoding": 0,
+  "removed_empty_text": 0,
+  "removed_invalid_label": 0,
+  "removed_too_short": 52,
+  "removed_service_lines": 0,
+  "invalid_json": 0,
+  "auto_fixed_labels": 22,
+  "auto_fixed_label_pairs": {
+    "other->answer": 3,
+    "other->question": 2,
+    "other->task": 8,
+    "task->answer": 3,
+    "task->other": 2,
+    "task->question": 4
+  },
+  "review_items": 462,
+  "conflicts": 0,
+  "label_distribution_before": {
+    "answer": 676,
+    "other": 1250,
+    "question": 752,
+    "task": 752
+  },
+  "label_distribution_after": {
+    "answer": 673,
+    "other": 1213,
+    "question": 748,
+    "task": 744
+  }
+}

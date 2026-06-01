@@ -1,0 +1,35 @@
+{
+  "total": 1341,
+  "train": 1097,
+  "val": 244,
+  "targets": {
+    "task": null,
+    "question": 300,
+    "answer": 300,
+    "other": 450
+  },
+  "total_counts": {
+    "answer": 300,
+    "other": 450,
+    "question": 300,
+    "task": 291
+  },
+  "train_counts": {
+    "question": 245,
+    "other": 369,
+    "answer": 245,
+    "task": 238
+  },
+  "val_counts": {
+    "other": 81,
+    "answer": 55,
+    "task": 53,
+    "question": 55
+  },
+  "source_total_counts": {
+    "task": 291,
+    "question": 704,
+    "answer": 366,
+    "other": 4706
+  }
+}

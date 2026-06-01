@@ -1,53 +1,67 @@
-import { createContext, useContext, useState, useEffect } from 'react';
-import api from '../lib/api';
+/* eslint-disable react-refresh/only-export-components */
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import api, { clearToken, getToken, setToken } from '../lib/api';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(getToken()));
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      setLoading(false);
+    if (!getToken()) {
       return;
     }
+
     api
       .get('/auth/me')
-      .then((res) => setUser(res.data.user))
-      .catch(() => localStorage.removeItem('token'))
+      .then((response) => setUser(response.data.user || response.data))
+      .catch(() => {
+        clearToken();
+        setUser(null);
+      })
       .finally(() => setLoading(false));
   }, []);
 
-  const login = async (username, password) => {
-    const res = await api.post('/auth/login', { username, password });
-    localStorage.setItem('token', res.data.token);
-    setUser(res.data.user);
-    return res.data;
+  const login = async (loginValue, password) => {
+    const payload = loginValue.includes('@')
+      ? { email: loginValue, password }
+      : { username: loginValue, password };
+    const response = await api.post('/auth/login', payload);
+    setToken(response.data.access_token || response.data.token);
+    setUser(response.data.user);
+    return response.data;
   };
 
-  const register = async (username, password) => {
-    const res = await api.post('/auth/register', { username, password });
-    localStorage.setItem('token', res.data.token);
-    setUser(res.data.user);
-    return res.data;
+  const register = async ({ email, username, password, fullName = '' }) => {
+    const response = await api.post('/auth/register', {
+      email,
+      username,
+      password,
+      full_name: fullName,
+    });
+    setToken(response.data.access_token || response.data.token);
+    setUser(response.data.user);
+    return response.data;
   };
 
   const logout = () => {
-    localStorage.removeItem('token');
+    clearToken();
     setUser(null);
   };
 
-  return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({ user, loading, isAuthenticated: Boolean(user), login, register, logout }),
+    [user, loading],
   );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+  return context;
 }

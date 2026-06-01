@@ -1,0 +1,38 @@
+{
+  "total": 216,
+  "train": 172,
+  "val": 21,
+  "test": 23,
+  "train_labels": {
+    "aspect": 15,
+    "deadline": 10,
+    "decision": 6,
+    "question": 20,
+    "sentiment_positive": 15,
+    "task": 106
+  },
+  "val_labels": {
+    "aspect": 2,
+    "deadline": 1,
+    "decision": 1,
+    "question": 2,
+    "sentiment_positive": 2,
+    "task": 13
+  },
+  "test_labels": {
+    "aspect": 2,
+    "deadline": 2,
+    "decision": 1,
+    "question": 3,
+    "sentiment_positive": 2,
+    "task": 13
+  },
+  "seed": 42,
+  "strategy": "seed",
+  "ratios": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "strategy_note": "stratified_by_label_with_safe_small_class_handling"
+}

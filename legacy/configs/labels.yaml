@@ -1,0 +1,13 @@
+labels:
+  priority:
+    - question
+    - decision
+    - deadline
+    - responsible
+    - task
+    - answer
+    - sentiment_negative
+    - sentiment_positive
+    - aspect
+    - sentiment_neutral
+    - other

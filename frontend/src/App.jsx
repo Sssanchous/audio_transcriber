@@ -1,88 +1,37 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import ProtectedRoute from './components/ProtectedRoute';
-import LoginPage from './pages/LoginPage';
-import RegisterPage from './pages/RegisterPage';
+import { AuthProvider } from './context/AuthContext';
 import UploadPage from './pages/UploadPage';
 import HistoryPage from './pages/HistoryPage';
+import DashboardPage from './pages/DashboardPage';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
 import ResultPage from './pages/ResultPage';
 
-function GuestRoute({ children }) {
-  const { user, loading } = useAuth();
-  if (loading) return null;
-  if (user) return <Navigate to="/" replace />;
-  return children;
-}
-
-function AppRoutes() {
+function Layout({ children }) {
   return (
-    <Routes>
-      <Route
-        path="/login"
-        element={
-          <GuestRoute>
-            <LoginPage />
-          </GuestRoute>
-        }
-      />
-      <Route
-        path="/register"
-        element={
-          <GuestRoute>
-            <RegisterPage />
-          </GuestRoute>
-        }
-      />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <div className="min-h-screen bg-gray-950">
-              <Navbar />
-              <div className="px-4 sm:px-6 lg:px-8 pb-12">
-                <UploadPage />
-              </div>
-            </div>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/history"
-        element={
-          <ProtectedRoute>
-            <div className="min-h-screen bg-gray-950">
-              <Navbar />
-              <div className="px-4 sm:px-6 lg:px-8 pb-12">
-                <HistoryPage />
-              </div>
-            </div>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/result/:id"
-        element={
-          <ProtectedRoute>
-            <div className="min-h-screen bg-gray-950">
-              <Navbar />
-              <div className="px-4 sm:px-6 lg:px-8 pb-12">
-                <ResultPage />
-              </div>
-            </div>
-          </ProtectedRoute>
-        }
-      />
-    </Routes>
+    <div className="min-h-screen bg-gray-950">
+      <Navbar />
+      <div className="px-4 sm:px-6 lg:px-8 pb-12">{children}</div>
+    </div>
   );
 }
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
-    </BrowserRouter>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<ProtectedRoute><Layout><UploadPage /></Layout></ProtectedRoute>} />
+          <Route path="/upload" element={<ProtectedRoute><Layout><UploadPage /></Layout></ProtectedRoute>} />
+          <Route path="/history" element={<ProtectedRoute><Layout><HistoryPage /></Layout></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute><Layout><DashboardPage /></Layout></ProtectedRoute>} />
+          <Route path="/result/:id" element={<ProtectedRoute><Layout><ResultPage /></Layout></ProtectedRoute>} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }

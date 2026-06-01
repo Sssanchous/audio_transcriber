@@ -1,0 +1,193 @@
+{
+  "source_result": "quality_check_b820.json",
+  "meeting_id": "meeting_885f2635c0d4",
+  "meeting_type": {
+    "label": "technical_research",
+    "confidence": 0.78,
+    "matched_markers": [
+      "гидродинамика",
+      "дебит",
+      "МГРП",
+      "скин-фактор",
+      "модель",
+      "генерализация",
+      "промысловые данные",
+      "вязкость",
+      "PVT",
+      "трещина"
+    ],
+    "scores": {
+      "project_meeting": 1,
+      "technical_research": 24,
+      "education_consultation": 10
+    }
+  },
+  "items": [
+    {
+      "source": "review_items",
+      "type": "task_candidate",
+      "text": "надо в этом плане именно развертку сделать.",
+      "clean_title": "Сделать развертку по параметрам/формуле безразмеривания",
+      "reason": "low_confidence_or_missing_owner",
+      "confidence": 0.75,
+      "source_fragments": [
+        252
+      ]
+    },
+    {
+      "source": "review_items",
+      "type": "task_candidate",
+      "text": "Тогда из ближайших задач получается попробовать описанный вариант разделения на S, N, A, L параметры",
+      "clean_title": "Проверить разделение исследования по группам параметров S, N, A, L",
+      "reason": "low_confidence_or_missing_owner",
+      "confidence": 0.55,
+      "source_fragments": [
+        266
+      ]
+    },
+    {
+      "source": "review_items",
+      "type": "task_candidate",
+      "text": "Сопоставить кейсы/реализации расчетов",
+      "clean_title": "Сопоставить кейсы/реализации расчетов",
+      "reason": "low_confidence_or_missing_owner",
+      "confidence": 0.62,
+      "source_fragments": []
+    },
+    {
+      "source": "review_items",
+      "type": "task_candidate",
+      "text": "Согласовать следующую встречу на четверг 19:30",
+      "clean_title": "Согласовать следующую встречу на четверг 19:30",
+      "reason": "low_confidence_or_missing_owner",
+      "confidence": 0.62,
+      "source_fragments": []
+    },
+    {
+      "source": "review_items",
+      "type": "task_candidate",
+      "text": "Скинуть промежуточные результаты",
+      "clean_title": "Скинуть промежуточные результаты",
+      "reason": "low_confidence_or_missing_owner",
+      "confidence": 0.62,
+      "source_fragments": []
+    },
+    {
+      "source": "review_items",
+      "type": "qa_candidate",
+      "text": "я правильно понимаю тогда мы должны будем выделить несколько групп по каждому параметру как скин",
+      "reason": "qa_status_partial",
+      "confidence": 0.55,
+      "source_fragments": [
+        29,
+        30
+      ]
+    },
+    {
+      "source": "review_items",
+      "type": "qa_candidate",
+      "text": "Вот, например, уже следующая неделя 16-го, которая, она уже там понедельник, вторник, с вами полностью свободная Ну, в общем, поэтому, наверное, динамически Так уже вам удобнее, если все с минусом Ну, давайте следующей недели тогда пока вот на четверг Так, после 7, да, вы сказали?",
+      "reason": "qa_status_partial",
+      "confidence": 0.55,
+      "source_fragments": [
+        41,
+        42
+      ]
+    },
+    {
+      "source": "review_items",
+      "type": "deadline_candidate",
+      "text": "Вот, например, уже следующая неделя",
+      "reason": "low_confidence_deadline",
+      "confidence": 0.55,
+      "source_fragments": [
+        283
+      ]
+    },
+    {
+      "source": "clean_tasks",
+      "type": "task_candidate",
+      "text": "надо в этом плане именно развертку сделать.",
+      "clean_title": "Сделать развертку по параметрам/формуле безразмеривания",
+      "confidence": 0.75,
+      "reason": "review_required_task",
+      "source_fragments": [
+        252
+      ]
+    },
+    {
+      "source": "clean_tasks",
+      "type": "task_candidate",
+      "text": "Тогда из ближайших задач получается попробовать описанный вариант разделения на S, N, A, L параметры",
+      "clean_title": "Проверить разделение исследования по группам параметров S, N, A, L",
+      "confidence": 0.55,
+      "reason": "review_required_task",
+      "source_fragments": [
+        266
+      ]
+    },
+    {
+      "source": "clean_tasks",
+      "type": "task_candidate",
+      "text": "Сопоставить кейсы/реализации расчетов",
+      "clean_title": "Сопоставить кейсы/реализации расчетов",
+      "confidence": 0.62,
+      "reason": "review_required_task",
+      "source_fragments": []
+    },
+    {
+      "source": "clean_tasks",
+      "type": "task_candidate",
+      "text": "Согласовать следующую встречу на четверг 19:30",
+      "clean_title": "Согласовать следующую встречу на четверг 19:30",
+      "confidence": 0.62,
+      "reason": "review_required_task",
+      "source_fragments": []
+    },
+    {
+      "source": "clean_tasks",
+      "type": "task_candidate",
+      "text": "Скинуть промежуточные результаты",
+      "clean_title": "Скинуть промежуточные результаты",
+      "confidence": 0.62,
+      "reason": "review_required_task",
+      "source_fragments": []
+    },
+    {
+      "source": "clean_questions_answers",
+      "type": "qa_candidate",
+      "text": "я правильно понимаю тогда мы должны будем выделить несколько групп по каждому параметру как скин",
+      "answer": "факторы так и все прочие длины длинные высоты и число число трещин наверное не нужно как это",
+      "status": "partial",
+      "reason": "qa_not_fully_answered",
+      "source_fragments": [
+        29,
+        30
+      ]
+    },
+    {
+      "source": "clean_questions_answers",
+      "type": "qa_candidate",
+      "text": "Вот, например, уже следующая неделя 16-го, которая, она уже там понедельник, вторник, с вами полностью свободная Ну, в общем, поэтому, наверное, динамически Так уже вам удобнее, если все с минусом Ну, давайте следующей недели тогда пока вот на четверг Так, после 7, да, вы сказали?",
+      "answer": "Так, ну давайте 7:30 тогда Все записал",
+      "status": "partial",
+      "reason": "qa_not_fully_answered",
+      "source_fragments": [
+        41,
+        42
+      ]
+    },
+    {
+      "source": "clean_deadlines",
+      "type": "deadline_candidate",
+      "text": "Вот, например, уже следующая неделя",
+      "deadline": "следующая неделя",
+      "kind": "mention",
+      "confidence": 0.55,
+      "reason": "deadline_needs_review",
+      "source_fragments": [
+        283
+      ]
+    }
+  ]
+}

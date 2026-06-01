@@ -1,133 +1,126 @@
-import { useState, useEffect } from 'react';
+/* eslint-disable react-hooks/set-state-in-effect */
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import Spinner from '../components/Spinner';
 import ErrorMessage from '../components/ErrorMessage';
 
+function filenameFromDisposition(disposition, fallback) {
+  const match = disposition?.match(/filename="?([^";]+)"?/i);
+  return match ? decodeURIComponent(match[1]) : fallback;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function HistoryPage() {
-  const [records, setRecords] = useState([]);
+  const [meetings, setMeetings] = useState([]);
+  const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [downloadError, setDownloadError] = useState('');
 
-  const fetchRecords = () => {
+  const load = () => {
     setLoading(true);
     setError('');
-    api
-      .get('/records')
-      .then((res) => setRecords(res.data))
-      .catch((err) => setError(err.response?.data?.detail || 'Ошибка загрузки'))
+    api.get('/meetings')
+      .then((response) => setMeetings(response.data))
+      .catch((err) => setError(err.response?.data?.detail || 'Ошибка загрузки архива'))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => {
-    fetchRecords();
-  }, []);
+  useEffect(() => { load(); }, []);
 
-  const handleDelete = async (id) => {
-    if (!confirm('Удалить эту запись?')) return;
+  const downloadReport = async (meetingId, format) => {
+    setDownloadError('');
     try {
-      await api.delete(`/records/${id}`);
-      setRecords((prev) => prev.filter((r) => r.id !== id));
-    } catch {
-      alert('Ошибка удаления');
+      const response = await api.get(`/meetings/${meetingId}/export/${format}`, { responseType: 'blob' });
+      const fallback = `pm_insights_${meetingId}.${format}`;
+      downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], fallback));
+    } catch (err) {
+      setDownloadError(err.response?.data?.detail || 'Не удалось скачать отчёт.');
     }
   };
 
   if (loading) return <Spinner />;
-  if (error) return <ErrorMessage message={error} onRetry={fetchRecords} />;
+  if (error) return <ErrorMessage message={error} onRetry={load} />;
+
+  const filteredMeetings = meetings.filter((meeting) => {
+    const haystack = `${meeting.meeting_title || ''} ${meeting.project_name || ''} ${meeting.original_filename || ''}`.toLowerCase();
+    return haystack.includes(filter.toLowerCase());
+  });
 
   return (
-    <div className="max-w-6xl mx-auto mt-8">
-      <h2 className="text-2xl font-bold text-white mb-6">История транскрипций</h2>
-      {records.length === 0 ? (
-        <div className="bg-gray-900 rounded-2xl p-8 border border-gray-800 text-center">
-          <p className="text-gray-400">Пока нет транскрипций</p>
-          <Link
-            to="/"
-            className="inline-block mt-4 text-indigo-400 hover:text-indigo-300"
-          >
-            Загрузить аудио
-          </Link>
-        </div>
-      ) : (
-        <div className="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wider text-gray-400">
-                  <th className="px-4 py-3">Файл</th>
-                  <th className="px-4 py-3">Проект</th>
-                  <th className="px-4 py-3 hidden sm:table-cell">Дата</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Длит.</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Задачи</th>
-                  <th className="px-4 py-3 hidden lg:table-cell">Q/A</th>
-                  <th className="px-4 py-3 hidden lg:table-cell">Sentiment</th>
-                  <th className="px-4 py-3 w-16"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {records.map((rec) => {
-                  const analytics = rec.analytics_json || {};
-                  return (
-                    <tr
-                      key={rec.id}
-                      className="border-b border-gray-800/50 hover:bg-gray-800/40 transition-colors"
-                    >
-                      <td className="px-4 py-3">
-                        <Link
-                          to={`/result/${rec.id}`}
-                          className="text-indigo-400 hover:text-indigo-300 font-medium"
-                        >
-                          {rec.filename}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-3 text-gray-300 text-sm">
-                        {rec.project_name || '—'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm hidden sm:table-cell">
-                        {rec.meeting_date || '—'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm hidden md:table-cell">
-                        {rec.duration ? `${rec.duration}с` : '—'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm hidden md:table-cell">
-                        {(rec.tasks_json || []).length}
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-sm hidden lg:table-cell">
-                        {(rec.qa_json || []).length}
-                      </td>
-                      <td className="px-4 py-3 text-sm hidden lg:table-cell">
-                        <span
-                          className={
-                            analytics.avg_sentiment_score > 0
-                              ? 'text-green-400'
-                              : analytics.avg_sentiment_score < 0
-                                ? 'text-red-400'
-                                : 'text-gray-400'
-                          }
-                        >
-                          {analytics.avg_sentiment_score ?? 0}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <button
-                          onClick={() => handleDelete(rec.id)}
-                          className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer"
-                          title="Удалить"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+    <div className="max-w-6xl mx-auto mt-8 space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-white">Архив встреч</h2>
+        <p className="text-gray-500 text-sm mt-1">Список встреч, результатов и отчётов пользователя.</p>
+      </div>
+
+      {downloadError && (
+        <div className="bg-red-950/20 border border-red-900/60 rounded-xl p-3 text-sm text-red-200">
+          {downloadError}
         </div>
       )}
+
+      <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+        <input
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
+          placeholder="Фильтр по названию встречи, проекту или файлу"
+        />
+      </div>
+
+      <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+        {filteredMeetings.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">Пока нет загруженных встреч</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-gray-400 border-b border-gray-800">
+              <tr>
+                <th className="text-left px-4 py-3">Встреча</th>
+                <th className="text-left px-4 py-3">Проект</th>
+                <th className="text-left px-4 py-3">Дата встречи</th>
+                <th className="text-left px-4 py-3">Дата загрузки</th>
+                <th className="text-left px-4 py-3">Статус</th>
+                <th className="text-left px-4 py-3">Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredMeetings.map((meeting) => (
+                <tr key={meeting.meeting_id} className="border-b border-gray-800/50">
+                  <td className="px-4 py-3">
+                    <Link className="text-indigo-400 hover:text-indigo-300" to={`/result/${meeting.meeting_id}`}>
+                      {meeting.meeting_title || meeting.original_filename}
+                    </Link>
+                    <p className="text-xs text-gray-500">{meeting.original_filename}</p>
+                  </td>
+                  <td className="px-4 py-3 text-gray-300">{meeting.project_name}</td>
+                  <td className="px-4 py-3 text-gray-400">{meeting.meeting_date || '-'}</td>
+                  <td className="px-4 py-3 text-gray-400">{meeting.upload_date?.slice(0, 10) || '-'}</td>
+                  <td className="px-4 py-3 text-gray-400">{meeting.processing_status}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      <Link className="text-indigo-400 hover:text-indigo-300" to={`/result/${meeting.meeting_id}`}>Открыть</Link>
+                      <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'pdf')}>PDF</button>
+                      <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'xlsx')}>Excel</button>
+                      <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'docx')}>Word</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
+

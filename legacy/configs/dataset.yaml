@@ -1,0 +1,6 @@
+dataset:
+  input: transcripts
+  output: datasets/pm_dataset.jsonl
+  format: jsonl
+  min_length: 10
+  include_other: false

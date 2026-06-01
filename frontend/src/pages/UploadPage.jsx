@@ -1,158 +1,288 @@
-import { useState, useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../lib/api';
 import Spinner from '../components/Spinner';
+import api from '../lib/api';
+
+const ALLOWED_EXTENSIONS = ['.mp3', '.wav', '.m4a'];
+
+function getExtension(name) {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+function getApiErrorMessage(error) {
+  const detail = error.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((item) => item.msg || JSON.stringify(item)).join('; ');
+  }
+  if (detail && typeof detail === 'object') return JSON.stringify(detail);
+  if (error.message) return error.message;
+  return 'неизвестная ошибка';
+}
 
 export default function UploadPage() {
   const navigate = useNavigate();
-  const fileRef = useRef(null);
-  const [file, setFile] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  const [meetingTitle, setMeetingTitle] = useState('');
   const [projectName, setProjectName] = useState('');
-  const [participants, setParticipants] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-  const [progress, setProgress] = useState('');
+  const [participantsText, setParticipantsText] = useState('');
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!file) return;
-    setError('');
-    setUploading(true);
-    setProgress('Загрузка и обработка аудио...');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploadStatus, setUploadStatus] = useState('idle');
+  const [uploadedMeetingId, setUploadedMeetingId] = useState(null);
+  const [uploadedFilename, setUploadedFilename] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [analyzeStatus, setAnalyzeStatus] = useState('idle');
+  const [analyzeError, setAnalyzeError] = useState('');
 
-    const form = new FormData();
-    form.append('file', file);
-    form.append('project_name', projectName);
-    form.append('participants', participants);
-    if (meetingDate) form.append('meeting_date', meetingDate);
+  const isUploading = uploadStatus === 'uploading';
+  const isAnalyzing = analyzeStatus === 'analyzing';
+  const isBusy = isUploading || isAnalyzing;
+
+  const validateBeforeUpload = (file) => {
+    if (!consentAccepted) return 'Подтвердите согласие на обработку данных.';
+    if (!meetingTitle.trim()) return 'Укажите название встречи.';
+    if (!projectName.trim()) return 'Укажите проект или направление.';
+    if (!participantsText.trim()) return 'Укажите участников встречи и их роли.';
+    if (!file) return 'Выберите аудиофайл.';
+    if (!ALLOWED_EXTENSIONS.includes(getExtension(file.name))) return 'Поддерживаются только MP3, WAV и M4A.';
+    if (file.size <= 0) return 'Пустой аудиофайл не может быть загружен.';
+    return '';
+  };
+
+  const uploadSelectedFile = async (file) => {
+    setUploadError('');
+    setAnalyzeError('');
+
+    const validationError = validateBeforeUpload(file);
+    if (validationError) {
+      setUploadStatus('error');
+      setUploadError(validationError);
+      return;
+    }
 
     try {
-      const res = await api.post('/upload', form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000,
-      });
-      navigate(`/result/${res.data.record_id}`);
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Ошибка загрузки файла');
-    } finally {
-      setUploading(false);
-      setProgress('');
+      setUploadStatus('uploading');
+      setUploadedMeetingId(null);
+      setUploadedFilename('');
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('meeting_title', meetingTitle.trim());
+      formData.append('project_name', projectName.trim());
+      formData.append('meeting_date', meetingDate || '');
+      formData.append('participants', participantsText.trim());
+
+      const response = await api.post('/upload', formData);
+      const payload = response.data || {};
+      const meetingId = payload.meeting_id || payload.id || payload.record_id;
+      if (!meetingId) {
+        throw new Error('backend did not return meeting_id');
+      }
+
+      setUploadedMeetingId(meetingId);
+      setUploadedFilename(payload.filename || payload.original_filename || file.name);
+      setUploadStatus('uploaded');
+      setAnalyzeStatus('idle');
+    } catch (error) {
+      console.error('Upload failed', error);
+      setUploadStatus('error');
+      setUploadError(`Не удалось загрузить файл: ${getApiErrorMessage(error)}`);
     }
   };
 
-  const dragOver = (e) => e.preventDefault();
+  const handleFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-  const drop = (e) => {
-    e.preventDefault();
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
+    setSelectedFile(file);
+    await uploadSelectedFile(file);
+    event.target.value = '';
   };
 
-  if (uploading) {
-    return (
-      <div className="max-w-2xl mx-auto mt-12">
-        <div className="bg-gray-900 rounded-2xl p-8 border border-gray-800">
-          <Spinner text={progress} />
-        </div>
-      </div>
-    );
-  }
+  const handleDrop = async (event) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+
+    setSelectedFile(file);
+    await uploadSelectedFile(file);
+  };
+
+  const openFilePicker = () => {
+    const validationError = validateBeforeUpload({ name: 'placeholder.mp3', size: 1 });
+    if (validationError && validationError !== 'Выберите аудиофайл.') {
+      setUploadStatus('error');
+      setUploadError(validationError);
+      return;
+    }
+    setUploadError('');
+    fileInputRef.current?.click();
+  };
+
+  const startAnalyze = async () => {
+    if (!uploadedMeetingId) return;
+
+    try {
+      setAnalyzeError('');
+      setAnalyzeStatus('analyzing');
+      await api.post(`/meetings/${uploadedMeetingId}/analyze`, null, { timeout: 3600000 });
+      setAnalyzeStatus('completed');
+    } catch (error) {
+      console.error('Analyze failed', error);
+      setAnalyzeStatus('error');
+      setAnalyzeError(`Не удалось запустить анализ: ${getApiErrorMessage(error)}`);
+    }
+  };
 
   return (
     <div className="max-w-2xl mx-auto mt-8">
-      <h2 className="text-2xl font-bold text-white mb-6">Загрузить аудио</h2>
-      <form
-        onSubmit={handleSubmit}
-        className="bg-gray-900 rounded-2xl p-8 border border-gray-800 space-y-6"
-      >
-        {error && (
-          <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 text-red-400 text-sm">
-            {error}
+      <h2 className="text-2xl font-bold text-white mb-6">Загрузка аудиозаписи встречи</h2>
+
+      <div className="bg-gray-900 rounded-xl p-8 border border-gray-800 space-y-6">
+        {!consentAccepted && (
+          <div className="bg-gray-950 border border-gray-700 rounded-xl p-5 space-y-4">
+            <h3 className="text-lg font-semibold text-white">Подтверждение правомерности обработки</h3>
+            <p className="text-sm text-gray-300">
+              Перед загрузкой подтвердите, что у вас есть право на обработку аудиофайла. PM Insights не записывает
+              встречи, не использует микрофон и обрабатывает только файл, который вы самостоятельно загружаете.
+            </p>
+            <label className="flex items-start gap-3 text-sm text-gray-200">
+              <input
+                type="checkbox"
+                checked={consentAccepted}
+                onChange={(event) => setConsentAccepted(event.target.checked)}
+                className="mt-1"
+              />
+              <span>Подтверждаю правомерность загрузки и обработки выбранного аудиофайла.</span>
+            </label>
           </div>
         )}
 
-        <div
-          onDragOver={dragOver}
-          onDrop={drop}
-          onClick={() => fileRef.current?.click()}
-          className="border-2 border-dashed border-gray-700 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-500 transition-colors"
-        >
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".mp3,.wav,.m4a,.opus"
-            className="hidden"
-            onChange={(e) => setFile(e.target.files[0])}
-          />
-          {file ? (
-            <div>
-              <p className="text-white font-medium">{file.name}</p>
-              <p className="text-gray-400 text-sm mt-1">
-                {(file.size / 1024 / 1024).toFixed(2)} МБ
-              </p>
+        {consentAccepted && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="space-y-1 text-sm text-gray-300">
+                <span>Название встречи</span>
+                <input
+                  value={meetingTitle}
+                  onChange={(event) => setMeetingTitle(event.target.value)}
+                  placeholder="Например: Еженедельная встреча по проекту"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
+                  disabled={isBusy}
+                />
+              </label>
+
+              <label className="space-y-1 text-sm text-gray-300">
+                <span>Проект / направление</span>
+                <input
+                  value={projectName}
+                  onChange={(event) => setProjectName(event.target.value)}
+                  placeholder="Например: PM Insights"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
+                  disabled={isBusy}
+                />
+              </label>
+
+              <label className="space-y-1 text-sm text-gray-300 sm:col-span-2">
+                <span>Дата встречи</span>
+                <input
+                  type="date"
+                  value={meetingDate}
+                  onChange={(event) => setMeetingDate(event.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
+                  disabled={isBusy}
+                />
+              </label>
             </div>
-          ) : (
-            <div>
-              <svg className="w-10 h-10 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-              </svg>
-              <p className="text-gray-400">
-                Перетащите файл или{' '}
-                <span className="text-indigo-400">нажмите для выбора</span>
-              </p>
-              <p className="text-gray-500 text-xs mt-1">MP3, WAV, M4A, OPUS</p>
+
+            <label className="block space-y-1 text-sm text-gray-300">
+              <span>Участники и роли</span>
+              <textarea
+                value={participantsText}
+                onChange={(event) => setParticipantsText(event.target.value)}
+                placeholder={'Например:\nИван Иванов — руководитель проекта\nАнна Смирнова — аналитик'}
+                rows={4}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
+                disabled={isBusy}
+              />
+            </label>
+
+            {(uploadError || analyzeError) && (
+              <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 text-red-300 text-sm">
+                {uploadError || analyzeError}
+              </div>
+            )}
+
+            <div
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={isBusy ? undefined : handleDrop}
+              onClick={isBusy ? undefined : openFilePicker}
+              className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
+                isBusy ? 'border-gray-800 cursor-not-allowed opacity-70' : 'border-gray-700 cursor-pointer hover:border-indigo-500'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/x-m4a"
+                className="hidden"
+                disabled={isBusy}
+                onChange={handleFileChange}
+              />
+
+              {uploadStatus === 'uploading' && <Spinner text="Файл загружается..." />}
+              {analyzeStatus === 'analyzing' && <Spinner text="Идёт анализ..." />}
+
+              {!isBusy && uploadStatus !== 'uploaded' && analyzeStatus !== 'completed' && (
+                <div>
+                  <p className="text-gray-300">Выберите готовый аудиофайл или перетащите его сюда</p>
+                  <p className="text-gray-500 text-xs mt-2">MP3, WAV, M4A</p>
+                </div>
+              )}
+
+              {!isBusy && uploadStatus === 'uploaded' && selectedFile && (
+                <div>
+                  <p className="text-white font-medium">Файл загружен: {uploadedFilename || selectedFile.name}</p>
+                  <p className="text-gray-400 text-sm mt-1">{(selectedFile.size / 1024 / 1024).toFixed(2)} МБ</p>
+                </div>
+              )}
+
+              {!isBusy && analyzeStatus === 'completed' && (
+                <div>
+                  <p className="text-white font-medium">Анализ завершён</p>
+                  {uploadedFilename && <p className="text-gray-400 text-sm mt-1">{uploadedFilename}</p>}
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
-              Проект
-            </label>
-            <input
-              type="text"
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="PM Insights"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
-              Дата встречи
-            </label>
-            <input
-              type="date"
-              value={meetingDate}
-              onChange={(e) => setMeetingDate(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-        </div>
+            {uploadStatus === 'uploaded' && analyzeStatus !== 'completed' && uploadedMeetingId && (
+              <button
+                type="button"
+                onClick={startAnalyze}
+                disabled={isAnalyzing}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-medium py-3 rounded-lg"
+              >
+                Запустить анализ
+              </button>
+            )}
 
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1.5">
-            Участники
-          </label>
-          <input
-            type="text"
-            value={participants}
-            onChange={(e) => setParticipants(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            placeholder="Иван, Анна, Сергей"
-          />
-        </div>
-
-        <button
-          type="submit"
-          disabled={!file}
-          className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-medium py-3 rounded-lg transition-colors cursor-pointer"
-        >
-          Загрузить и обработать
-        </button>
-      </form>
+            {analyzeStatus === 'completed' && uploadedMeetingId && (
+              <button
+                type="button"
+                onClick={() => navigate(`/result/${uploadedMeetingId}`)}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg"
+              >
+                Открыть результат
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

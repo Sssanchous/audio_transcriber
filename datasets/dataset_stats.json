@@ -1,0 +1,31 @@
+{
+  "total_examples": 3378,
+  "label_counts": {
+    "answer": 673,
+    "other": 1213,
+    "question": 748,
+    "task": 744
+  },
+  "source_counts": {
+    "manual_examples": 2219,
+    "pm_dataset": 178,
+    "protocol_structured": 503,
+    "real_hard_examples": 449,
+    "real_reviewed_examples": 29
+  },
+  "audit": {
+    "total_before": 3430,
+    "total_after": 3378,
+    "removed_duplicates": 0,
+    "removed_bad_encoding": 0,
+    "removed_too_short": 52,
+    "auto_fixed_labels": 22,
+    "review_items": 462
+  },
+  "allowed_labels": [
+    "answer",
+    "other",
+    "question",
+    "task"
+  ]
+}

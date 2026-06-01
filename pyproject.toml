@@ -1,0 +1,9 @@
+[project]
+name = "pm-insights"
+version = "0.1.0"
+description = "MVP for Russian project meeting audio analysis."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

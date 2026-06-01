@@ -5,25 +5,26 @@ import { useAuth } from '../context/AuthContext';
 export default function RegisterPage() {
   const { register } = useAuth();
   const navigate = useNavigate();
+  const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setError('');
-    if (password !== confirm) {
-      setError('Пароли не совпадают');
+    if (password !== confirmPassword) {
+      setError('Пароли не совпадают.');
       return;
     }
     setLoading(true);
     try {
-      await register(username, password);
-      navigate('/');
+      await register({ email: email.trim(), username: username.trim(), password });
+      navigate('/upload');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Ошибка регистрации');
+      setError(err.response?.data?.detail || 'Не удалось зарегистрироваться.');
     } finally {
       setLoading(false);
     }
@@ -31,76 +32,76 @@ export default function RegisterPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center px-4">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-white">PM Insights</h1>
-          <p className="text-gray-400 mt-2">Создание аккаунта</p>
+      <form onSubmit={handleSubmit} className="w-full max-w-md bg-gray-900 border border-gray-800 rounded-lg p-7 space-y-5">
+        <div>
+          <h1 className="text-2xl font-bold text-white">PM Insights</h1>
+          <p className="text-sm text-gray-400 mt-1">Регистрация пользователя</p>
         </div>
-        <form
-          onSubmit={handleSubmit}
-          className="bg-gray-900 rounded-2xl p-8 border border-gray-800 space-y-5"
+
+        {error && <div className="text-sm text-red-300 bg-red-950/40 border border-red-800 rounded-md p-3">{error}</div>}
+
+        <label className="block">
+          <span className="block text-sm text-gray-300 mb-1.5">Email</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-white"
+            required
+            autoComplete="email"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-sm text-gray-300 mb-1.5">Имя пользователя</span>
+          <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-white"
+            required
+            minLength={3}
+            autoComplete="username"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-sm text-gray-300 mb-1.5">Пароль</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-white"
+            required
+            minLength={6}
+            autoComplete="new-password"
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-sm text-gray-300 mb-1.5">Повторите пароль</span>
+          <input
+            type="password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-white"
+            required
+            minLength={6}
+            autoComplete="new-password"
+          />
+        </label>
+
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-medium rounded-md py-2.5"
         >
-          {error && (
-            <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 text-red-400 text-sm">
-              {error}
-            </div>
-          )}
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
-              Имя пользователя
-            </label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
-              minLength={3}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              placeholder="username"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
-              Пароль
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={4}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              placeholder="••••••"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">
-              Подтвердите пароль
-            </label>
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              required
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              placeholder="••••••"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg transition-colors cursor-pointer"
-          >
-            {loading ? 'Регистрация...' : 'Зарегистрироваться'}
-          </button>
-          <p className="text-center text-sm text-gray-400">
-            Уже есть аккаунт?{' '}
-            <Link to="/login" className="text-indigo-400 hover:text-indigo-300">
-              Войти
-            </Link>
-          </p>
-        </form>
-      </div>
+          {loading ? 'Регистрация...' : 'Зарегистрироваться'}
+        </button>
+
+        <p className="text-sm text-gray-400 text-center">
+          Уже есть аккаунт? <Link to="/login" className="text-indigo-300 hover:text-indigo-200">Войти</Link>
+        </p>
+      </form>
     </div>
   );
 }
