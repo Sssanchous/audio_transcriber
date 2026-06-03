@@ -92,18 +92,18 @@ def _participant_aliases(participants: list[str] | None) -> set[str]:
     return aliases
 
 
-def _is_valid_person(value: str, participants: list[str] | None = None) -> bool:
+def _is_valid_person(value: str, participants: list[str] | None = None, ner_people: set[str] | None = None) -> bool:
     name = (value or "").strip(" ,.:;")
     if not name:
         return False
     if name.lower() in STOPWORDS:
         return False
-    return name in KNOWN_NAMES or name in _participant_aliases(participants)
+    return name in KNOWN_NAMES or name in _participant_aliases(participants) or name in (ner_people or set())
 
 
-def _leading_names(text: str, participants: list[str] | None = None) -> list[str]:
+def _leading_names(text: str, participants: list[str] | None = None, ner_people: set[str] | None = None) -> list[str]:
     parts = re.split(r"[,.:;]\s*", text or "")[:3]
-    return [part.strip() for part in parts if _is_valid_person(part.strip(), participants)]
+    return [part.strip() for part in parts if _is_valid_person(part.strip(), participants, ner_people)]
 
 
 def _canonical_name(candidate: str, participants: list[str] | None = None) -> str:
@@ -115,10 +115,30 @@ def _canonical_name(candidate: str, participants: list[str] | None = None) -> st
     return clean
 
 
+def _leading_name_before_imperative(
+    text: str,
+    participants: list[str] | None = None,
+    ner_people: set[str] | None = None,
+) -> str | None:
+    aliases = _participant_aliases(participants) | KNOWN_NAMES | (ner_people or set())
+    for alias in sorted(aliases, key=len, reverse=True):
+        if not _is_valid_person(alias, participants, ner_people):
+            continue
+        pattern = rf"^\s*{re.escape(alias)}\s+{IMPERATIVE_RE.pattern}"
+        if re.search(pattern, text or "", flags=re.IGNORECASE):
+            return _canonical_name(alias, participants)
+    return None
+
+
 def find_responsibles(text: str, participants: list[str] | None = None) -> list[str]:
     text = text or ""
     names: list[str] = []
-    leading = _leading_names(text, participants)
+    entities = extract_entities(text)
+    ner_people = set(entities.get("people", []))
+    leading = _leading_names(text, participants, ner_people)
+    leading_without_punctuation = _leading_name_before_imperative(text, participants, ner_people)
+    if leading_without_punctuation:
+        names.append(leading_without_punctuation)
 
     if len(leading) >= 2:
         parts = re.split(r"[,.:;]\s*", text, maxsplit=2)
@@ -141,15 +161,15 @@ def find_responsibles(text: str, participants: list[str] | None = None) -> list[
     for pattern in patterns:
         for match in re.finditer(pattern, text, flags=re.IGNORECASE):
             candidate = match.group(1)
-            if _is_valid_person(candidate, participants):
+            if _is_valid_person(candidate, participants, ner_people):
                 names.append(_canonical_name(candidate, participants))
 
     if re.search(r"\b(ответствен|поручаем|исполнитель|бер[её]т\s+на\s+себя)\b", text, re.IGNORECASE):
-        for candidate in extract_entities(text).get("people", []):
-            if _is_valid_person(candidate, participants):
+        for candidate in entities.get("people", []):
+            if _is_valid_person(candidate, participants, ner_people):
                 names.append(_canonical_name(candidate, participants))
 
-    return sorted({name for name in names if _is_valid_person(name, participants)})
+    return sorted({name for name in names if _is_valid_person(name, participants, ner_people)})
 
 
 def extract_responsibles(fragments: list[dict], participants: list[str] | None = None) -> list[dict]:

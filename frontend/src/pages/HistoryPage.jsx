@@ -25,6 +25,8 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [downloadError, setDownloadError] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deletingId, setDeletingId] = useState('');
 
   const load = () => {
     setLoading(true);
@@ -48,6 +50,21 @@ export default function HistoryPage() {
     }
   };
 
+  const deleteMeeting = async (meeting) => {
+    const meetingId = meeting.meeting_id;
+    if (!window.confirm('Удалить встречу? Это действие нельзя отменить.')) return;
+    setDeleteError('');
+    setDeletingId(meetingId);
+    try {
+      await api.delete(`/meetings/${meetingId}`);
+      setMeetings((current) => current.filter((item) => item.meeting_id !== meetingId));
+    } catch (err) {
+      setDeleteError(err.response?.data?.detail || 'Не удалось удалить встречу.');
+    } finally {
+      setDeletingId('');
+    }
+  };
+
   if (loading) return <Spinner />;
   if (error) return <ErrorMessage message={error} onRetry={load} />;
 
@@ -66,6 +83,11 @@ export default function HistoryPage() {
       {downloadError && (
         <div className="bg-red-950/20 border border-red-900/60 rounded-xl p-3 text-sm text-red-200">
           {downloadError}
+        </div>
+      )}
+      {deleteError && (
+        <div className="bg-red-950/20 border border-red-900/60 rounded-xl p-3 text-sm text-red-200">
+          {deleteError}
         </div>
       )}
 
@@ -112,6 +134,14 @@ export default function HistoryPage() {
                       <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'pdf')}>PDF</button>
                       <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'xlsx')}>Excel</button>
                       <button type="button" className="text-gray-300 hover:text-white" onClick={() => downloadReport(meeting.meeting_id, 'docx')}>Word</button>
+                      <button
+                        type="button"
+                        className="text-red-300 hover:text-red-100 disabled:opacity-60"
+                        disabled={deletingId === meeting.meeting_id}
+                        onClick={() => deleteMeeting(meeting)}
+                      >
+                        {deletingId === meeting.meeting_id ? 'Удаление...' : 'Удалить'}
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -123,4 +153,3 @@ export default function HistoryPage() {
     </div>
   );
 }
-

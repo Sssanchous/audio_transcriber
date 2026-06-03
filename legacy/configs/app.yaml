@@ -1,9 +1,0 @@
-app:
-  name: PM Insights
-  language: ru
-  mode: mvp
-  records_audio: false
-  upload_formats:
-    - .mp3
-    - .wav
-    - .m4a

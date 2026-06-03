@@ -104,6 +104,11 @@ BAD_TASK_PATTERNS = (
     "качество должно отражаться в цене",
     "давайте делить 50 на 50",
     "делим 50 на 50",
+    "того чтобы проверить",
+    "того, чтобы проверить",
+    "можно будет",
+    "далеко не бесполезно",
+    "себя поискать кейсы",
 )
 
 ACTION_ITEM_RE = re.compile(
@@ -142,6 +147,18 @@ TECH_TERMS_RE = re.compile(
     r"\b(гидродинамик|дебит|скважин|трещин|мгрп|скин[-\s]?фактор|проницаем|"
     r"интерпретац|безразмерн|аппроксимац|калькулированн|эталонн|параметр|"
     r"вязкост|pvt|вкр|пласт|флюид|модель|генерализац)\b",
+    re.IGNORECASE,
+)
+TECHNICAL_TASK_OBJECT_RE = re.compile(
+    r"\b(устойчивост\w+\s+модел\w+|точност\w+|разв[её]ртк\w+|групп\w+\s+параметр\w+|"
+    r"s,\s*n,\s*a,\s*l|s\s+n\s+a\s+l|кейс\w+|реализац\w+|расч[её]т\w+|"
+    r"вычислительн\w+\s+эксперимент|вкр|раздел|следующ\w+\s+встреч\w+|четверг|7[:.]30|"
+    r"промежуточн\w+\s+результат\w+|скин-?фактор|безразмер\w+|параметр\w+)\b",
+    re.IGNORECASE,
+)
+TECHNICAL_WEAK_TASK_RE = re.compile(
+    r"\b((?:для\s+)?того,?\s+чтобы\s+проверить|можно\s+будет|далеко\s+не\s+бесполезно|"
+    r"(?:у\s+)?себя\s+поискать\s+кейс\w*|как\s+раз[-\s]?таки|что-нибудь|какие-то|что-то)\b",
     re.IGNORECASE,
 )
 
@@ -191,7 +208,14 @@ def is_real_task(text: str, technical_mode: bool | None = None) -> bool:
 
     technical = is_technical_text(clean) if technical_mode is None else technical_mode
     if technical:
-        return has_action_pattern and not lower.startswith(("можно ", "хотелось бы", "было бы"))
+        if TECHNICAL_WEAK_TASK_RE.search(clean):
+            return False
+        return (
+            has_person_imperative
+            or has_action_item
+            or has_org_action
+            or (has_action_pattern and bool(TECHNICAL_TASK_OBJECT_RE.search(clean)) and not lower.startswith(("можно ", "хотелось бы", "было бы")))
+        )
 
     if has_imperative:
         return True

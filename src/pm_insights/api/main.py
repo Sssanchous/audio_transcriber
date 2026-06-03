@@ -14,6 +14,7 @@ from pm_insights import db, settings
 from pm_insights import auth
 from pm_insights.audio.upload_validator import validate_audio_file
 from pm_insights.export.report_builder import build_report_payload, export_docx, export_json, export_pdf, export_xlsx
+from pm_insights.meeting import storage as meeting_storage
 from pm_insights.meeting.pipeline import analyze_meeting
 from pm_insights.meeting.participants import parse_participants, participants_to_text
 from pm_insights.nlp.postprocessing import normalize_analysis_result
@@ -97,6 +98,28 @@ async def _save_upload(file: UploadFile) -> tuple[Path, str, int]:
         stored_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Некорректный аудиофайл: {validation.reason}")
     return stored_path, extension, validation.size_bytes
+
+
+def _enqueue_meeting_analysis(meeting_id: str) -> str:
+    try:
+        from pm_insights.worker import analyze_meeting_task, celery_app
+    except Exception as exc:
+        raise HTTPException(503, f"Async processing is not available: {exc}") from exc
+    if celery_app is None or not hasattr(analyze_meeting_task, "delay"):
+        raise HTTPException(503, "Async processing requires celery and redis dependencies.")
+    try:
+        db.update_meeting_status(meeting_id, "queued")
+        db.log_processing(meeting_id, "celery", "queued", "Analysis queued")
+        task = analyze_meeting_task.delay(meeting_id)
+        task_id = str(task.id)
+        db.update_meeting_metadata(meeting_id, {"async_task_id": task_id})
+        return task_id
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.update_meeting_status(meeting_id, "uploaded")
+        db.log_processing(meeting_id, "celery", "queue_failed", str(exc))
+        raise HTTPException(503, f"Failed to enqueue analysis: {exc}") from exc
 
 
 @app.get("/")
@@ -203,8 +226,6 @@ async def upload_audio(
     participant_items = parse_participants(participants)
     if not meeting_title:
         raise HTTPException(400, "Укажите название встречи.")
-    if not participant_items:
-        raise HTTPException(400, "Укажите участников встречи и их роли. Это нужно для корректного определения ответственных.")
 
     stored_path, extension, size_bytes = await _save_upload(file)
     meeting_id = f"meeting_{uuid4().hex[:12]}"
@@ -238,6 +259,16 @@ async def upload_audio(
         stored_path.unlink(missing_ok=True)
         raise _db_error(exc) from exc
 
+    if settings.ASYNC_PROCESSING:
+        task_id = _enqueue_meeting_analysis(meeting_id)
+        return {
+            "ok": True,
+            "meeting_id": meeting_id,
+            "record_id": meeting_id,
+            "task_id": task_id,
+            "status": "queued",
+        }
+
     return {"ok": True, "meeting_id": meeting_id, "record_id": meeting_id, "status": meeting["processing_status"]}
 
 
@@ -250,6 +281,10 @@ def analyze_uploaded(meeting_id: str, current_user: dict | None = Depends(auth.m
         raise _db_error(exc) from exc
     if not meeting:
         raise HTTPException(404, "Meeting not found")
+
+    if settings.ASYNC_PROCESSING:
+        task_id = _enqueue_meeting_analysis(meeting_id)
+        return {"ok": True, "meeting_id": meeting_id, "task_id": task_id, "status": "queued"}
 
     audio_path = settings.UPLOADS_DIR / meeting["stored_filename"]
     if not audio_path.exists():
@@ -292,6 +327,51 @@ def meeting_detail(meeting_id: str, current_user: dict | None = Depends(auth.may
     if not meeting:
         raise HTTPException(404, "Meeting not found")
     return meeting
+
+
+@app.get("/meetings/{meeting_id}/status")
+@app.get("/api/meetings/{meeting_id}/status")
+def meeting_status(meeting_id: str, current_user: dict | None = Depends(auth.maybe_current_user)) -> dict:
+    try:
+        meeting = db.get_meeting(meeting_id, user_id=_current_user_id(current_user))
+    except Exception as exc:
+        raise _db_error(exc) from exc
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+    metadata = meeting.get("metadata") or {}
+    status = meeting.get("processing_status") or "unknown"
+    public_status = "success" if status == "completed" else "failure" if status in {"failed", "failure"} else status
+    return {
+        "meeting_id": meeting_id,
+        "status": status,
+        "job_status": public_status,
+        "task_id": metadata.get("async_task_id"),
+        "result_ready": status == "completed",
+    }
+
+
+@app.delete("/meetings/{meeting_id}")
+@app.delete("/api/meetings/{meeting_id}")
+def delete_meeting(meeting_id: str, current_user: dict | None = Depends(auth.maybe_current_user)) -> dict:
+    user_id = _current_user_id(current_user)
+    try:
+        meeting = db.get_meeting(meeting_id, user_id=user_id)
+    except Exception as exc:
+        raise _db_error(exc) from exc
+    if not meeting:
+        raise HTTPException(404, "Meeting not found")
+
+    try:
+        deleted = db.delete_meeting(meeting_id, user_id=user_id)
+        if not deleted:
+            raise HTTPException(404, "Meeting not found")
+        meeting_storage.delete_meeting(meeting_id, output_dir=settings.RESULTS_DIR)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _db_error(exc) from exc
+
+    return {"status": "deleted", "meeting_id": meeting_id}
 
 
 @app.get("/meetings/{meeting_id}/result")
@@ -375,11 +455,18 @@ def _dynamic_analysis_for_result(result: dict, user_id: int | None) -> dict:
     current_metrics = result.get("metrics", {})
     last = previous[-1]
     last_metrics = last.get("metrics", {})
-    topic_counts: dict[str, int] = {}
+    topic_counts: Counter = Counter()
     for item in completed:
-        for topic, count in item.get("metrics", {}).get("topic_frequencies", {}).items():
-            topic_counts[topic] = topic_counts.get(topic, 0) + int(count)
-    repeated_topics = [topic for topic, _ in sorted(topic_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]]
+        normalized_item = normalize_analysis_result(dict(item))
+        for topic in normalized_item.get("clean_topics") or []:
+            name = topic.get("topic_name") or topic.get("title")
+            if name:
+                topic_counts[str(name)] += int(topic.get("count") or 1)
+        for aspect in normalized_item.get("clean_aspects") or []:
+            name = aspect.get("title") or aspect.get("name")
+            if name:
+                topic_counts[str(name)] += int(aspect.get("count") or 1)
+    repeated_topics = [topic for topic, count in topic_counts.most_common(5) if count > 1]
     return {
         "available": True,
         "meeting_key": key,
@@ -393,6 +480,7 @@ def _dynamic_analysis_for_result(result: dict, user_id: int | None) -> dict:
         "negative_fragments_delta": current_metrics.get("negative_fragments_count", 0)
         - last_metrics.get("negative_fragments_count", 0),
         "repeated_topics": repeated_topics,
+        "repeated_topics_message": "" if repeated_topics else "Повторяющиеся аспекты не определены.",
         "unresolved_questions": [
             item.get("question")
             for item in result.get("clean_questions_answers", [])
@@ -506,7 +594,6 @@ def _meeting_type_value(item: dict) -> str:
 def _clean_items(item: dict, section_id: str, clean_field: str, raw_field: str | None = None) -> list:
     aliases = {
         "questions_answers": {"questions_answers", "qa"},
-        "research_actions": {"research_actions", "tasks"},
         "topics": {"topics", "aspects_topics"},
     }
     section_ids = aliases.get(section_id, {section_id})
@@ -521,11 +608,6 @@ def _clean_items(item: dict, section_id: str, clean_field: str, raw_field: str |
 
 
 def _dashboard_task_count(item: dict) -> int:
-    meeting_type = _meeting_type_value(item)
-    if meeting_type in {"technical_research", "education_consultation"}:
-        actions = _clean_items(item, "research_actions", "clean_research_actions")
-        if actions:
-            return len(actions)
     if item.get("report_sections") or item.get("clean_tasks") is not None:
         count = len(_clean_items(item, "tasks", "clean_tasks"))
         if count:
@@ -556,25 +638,15 @@ def _dashboard_sentiment(item: dict) -> tuple[float, int, int, int]:
 def _dashboard_aspects(item: dict) -> Counter:
     stopwords = {"и", "в", "на", "по", "для", "это", "как", "что", "нет", "да", "встреча"}
     counter: Counter = Counter()
-    metrics = item.get("metrics") or {}
-    for source in (metrics.get("aspect_frequencies") or {}, item.get("aspect_frequencies") or {}):
-        for key, value in source.items():
-            name = str(key).strip().lower()
-            if name and name not in stopwords:
-                counter[name] += int(value)
-    for row in item.get("aspects") or []:
-        for aspect in row.get("aspects") or []:
-            name = str(aspect).strip().lower()
-            if name and name not in stopwords:
-                counter[name] += 1
-    for topic in item.get("topics") or []:
-        name = str(topic.get("topic_name") or topic.get("name") or "").strip().lower()
+    normalized = normalize_analysis_result(dict(item))
+    for topic in normalized.get("clean_topics") or []:
+        name = str(topic.get("topic_name") or topic.get("title") or "").strip().lower()
         if name and name not in stopwords:
-            counter[name] += max(1, len(topic.get("fragments") or []))
-        for keyword in topic.get("keywords") or []:
-            word = str(keyword).strip().lower()
-            if len(word) > 2 and word not in stopwords:
-                counter[word] += 1
+            counter[name] += int(topic.get("count") or 1)
+    for aspect in normalized.get("clean_aspects") or []:
+        name = str(aspect.get("title") or aspect.get("name") or "").strip().lower()
+        if name and name not in stopwords:
+            counter[name] += int(aspect.get("count") or 1)
     return counter
 
 
@@ -659,6 +731,7 @@ def dashboard(
     average_sentiment = round(
         sum(row["average_sentiment"] for row in sentiment_trend) / len(sentiment_trend), 3
     ) if sentiment_trend else 0.0
+    negative_count = sum(row.get("negative_count", 0) for row in sentiment_trend)
     average_processing = _average(processing_times)
     average_1h = _average(estimated_1h_times)
     summary = {
@@ -671,6 +744,7 @@ def dashboard(
         "responsibles_count": responsibles_count,
         "deadlines_count": deadlines_count,
         "average_sentiment": average_sentiment,
+        "negative_count": negative_count,
         "average_processing_seconds": average_processing,
         "average_estimated_1h_minutes": average_1h,
     }
@@ -698,8 +772,7 @@ def dashboard(
         "responsibles_count": responsibles_count,
         "deadlines_count": deadlines_count,
         "average_sentiment": average_sentiment,
-        "aspect_frequencies": dict(aspect_counter),
-        "topic_frequencies": dict(aspect_counter),
+        "negative_count": negative_count,
         "average_processing_time_seconds": average_processing,
         "average_estimated_1h_processing_minutes": average_1h,
         "meeting_groups": [],

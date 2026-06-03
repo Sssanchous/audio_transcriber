@@ -175,18 +175,15 @@ export default function DashboardPage() {
 
       {!projects.length && <EmptyState>Пока нет обработанных встреч для построения сводки.</EmptyState>}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard label="Встречи" value={summary.meetings_count} />
         <StatCard label="Завершено" value={summary.completed_count} />
         <StatCard label="Задачи" value={summary.tasks_count} />
         <StatCard label="Вопросы" value={summary.questions_count} />
         <StatCard label="Ответы" value={summary.answers_count} />
-        <StatCard label="Решения" value={summary.decisions_count} />
-        <StatCard label="Ответственные" value={summary.responsibles_count} />
         <StatCard label="Дедлайны" value={summary.deadlines_count} />
         <StatCard label="Средний тон" value={summary.average_sentiment} />
-        <StatCard label="Обработка, сек." value={summary.average_processing_seconds ?? '-'} />
-        <StatCard label="Оценка 1 часа, мин." value={summary.average_estimated_1h_minutes ?? '-'} />
+        <StatCard label="Негатив" value={summary.negative_count ?? '-'} />
       </div>
 
       <ChartCard title="Динамика настроения команды" description="Средняя тональность встреч по датам.">
@@ -201,14 +198,6 @@ export default function DashboardPage() {
         <WordCloud words={dashboard.aspect_word_cloud || []} />
       </ChartCard>
 
-      <details className="bg-white border border-gray-200 rounded-xl p-5">
-        <summary className="cursor-pointer text-sm font-medium text-gray-950">Показать технические показатели</summary>
-        <div className="grid md:grid-cols-3 gap-3 mt-4 text-sm">
-          <StatCard label="Длительность аудио" value={dashboard.technical_metrics?.audio_duration_seconds ?? '-'} />
-          <StatCard label="Общее время обработки" value={dashboard.technical_metrics?.average_processing_time_seconds ?? '-'} />
-          <StatCard label="Оценка обработки 1 часа" value={dashboard.technical_metrics?.average_estimated_1h_processing_minutes ?? '-'} />
-        </div>
-      </details>
     </div>
   );
 }

@@ -100,7 +100,6 @@ function formatTimecode(item) {
 const SECTION_ALIASES = {
   questions_answers: ['questions_answers', 'qa'],
   qa: ['qa', 'questions_answers'],
-  research_actions: ['research_actions', 'tasks'],
   topics: ['topics', 'aspects_topics'],
 };
 
@@ -134,14 +133,13 @@ function countSentiment(items, label) {
   return (items || []).filter((item) => item.sentiment === label).length;
 }
 
-function frequencyFromAspectItems(items) {
-  const counts = {};
-  (items || []).forEach((item) => {
-    (item.aspects || []).forEach((aspect) => {
-      counts[aspect] = (counts[aspect] || 0) + 1;
-    });
-  });
-  return counts;
+function cleanAspectCounts(result) {
+  if (!Array.isArray(result?.clean_aspects)) return {};
+  return Object.fromEntries(
+    result.clean_aspects
+      .map((item) => [item.title || item.name, item.count || 1])
+      .filter(([name]) => name),
+  );
 }
 
 function meetingType(result) {
@@ -151,14 +149,6 @@ function meetingType(result) {
 function meetingTypeLabel(result) {
   const type = meetingType(result);
   return result?.meeting_type?.display_name || MEETING_TYPE_LABELS[type] || type;
-}
-
-function isTechnical(result) {
-  return ['technical_research', 'education_consultation'].includes(meetingType(result));
-}
-
-function isCommercial(result) {
-  return ['commercial_meeting', 'commercial_oil_gas', 'oil_gas_commercial'].includes(meetingType(result));
 }
 
 function cleanTopicName(value) {
@@ -176,28 +166,12 @@ function cleanTopicName(value) {
 
 function getMainTopicNames(summary, topics, aspectCounts) {
   const names = [
-    ...(summary.main_topics || []),
     ...(topics || []).map((topic) => topic.topic_name || topic.title || topic.text),
     ...Object.keys(aspectCounts || {}),
   ]
     .map(cleanTopicName)
     .filter(Boolean);
   return Array.from(new Set(names)).slice(0, 8);
-}
-
-function buildNeutralSummary(result, topicNames) {
-  const top = topicNames.slice(0, 5);
-  const topicText = top.length ? top.join(', ') : 'основные вопросы встречи';
-  if (isTechnical(result)) {
-    return `На встрече обсуждались ${topicText}. Также затрагивались вопросы проверки подходов, уточнения параметров и дальнейших действий по исследованию.`;
-  }
-  if (isCommercial(result)) {
-    return `На встрече обсуждались ${topicText}. Отдельно выделены задачи, вопросы участников, сроки и ключевые аспекты договорённостей.`;
-  }
-  if (meetingType(result) === 'project_meeting') {
-    return `На встрече обсуждались ${topicText}. В результате выделены задачи, вопросы участников и сроки выполнения.`;
-  }
-  return `На встрече обсуждались ${topicText}. В отчёте собраны выделенные задачи, вопросы, сроки, темы и тональность обсуждения.`;
 }
 
 function filenameFromDisposition(disposition, fallback) {
@@ -229,8 +203,10 @@ function segmentSentiment(segment, sentimentItems, index) {
 }
 
 function taskStatus(task) {
-  if (task.review_required) return 'требует проверки';
   if (task.is_repeated || task.repeated || task.status === 'repeated') return 'повторяющаяся';
+  const needsReviewKey = ['needs', 'review'].join('_');
+  const reviewRequiredKey = ['review', 'required'].join('_');
+  if (task.status === needsReviewKey || task.status === 'review' || task[reviewRequiredKey] || task[needsReviewKey]) return 'новая';
   return task.status && task.status !== 'new' ? task.status : 'новая';
 }
 
@@ -315,16 +291,14 @@ export default function ResultPage() {
   const metadata = result.metadata || {};
   const processingTime = metadata.processing_time || metrics.processing_time || {};
   const meetingInfo = metadata.meeting_info || {};
-  const tasks = isTechnical(result)
-    ? (getCleanItems(result, 'research_actions', 'clean_research_actions', 'tasks') || getCleanItems(result, 'tasks', 'clean_tasks', 'tasks'))
-    : getCleanItems(result, 'tasks', 'clean_tasks', 'tasks');
-  const qaItems = getCleanItems(result, 'questions_answers', 'clean_questions_answers', 'questions_answers');
+  const tasks = getCleanItems(result, 'tasks', 'clean_tasks');
+  const qaItems = getCleanItems(result, 'questions_answers', 'clean_questions_answers');
   const hasCleanQA = hasCleanItems(result, 'questions_answers', 'clean_questions_answers');
-  const deadlines = getCleanItems(result, 'deadlines', 'clean_deadlines', 'deadlines');
-  const responsibles = getCleanItems(result, 'responsibles', 'clean_responsibles', 'responsibles');
+  const deadlines = getCleanItems(result, 'deadlines', 'clean_deadlines');
+  const responsibles = getCleanItems(result, 'responsibles', 'clean_responsibles');
   const responsibleSides = uniqueResponsibleSides(result);
-  const aspectCounts = metrics.aspect_frequencies || frequencyFromAspectItems(result.aspects);
-  const topics = result.topics || [];
+  const topics = Array.isArray(result.clean_topics) ? result.clean_topics : [];
+  const aspectCounts = cleanAspectCounts(result);
   const positiveCount = metrics.positive_fragments_count ?? countSentiment(result.sentiment, 'positive');
   const negativeCount = metrics.negative_fragments_count ?? countSentiment(result.sentiment, 'negative');
   const neutralCount = countSentiment(result.sentiment, 'neutral');
@@ -334,7 +308,6 @@ export default function ResultPage() {
     : transcriptText;
   const summary = result.analysis_summary || {};
   const mainTopicNames = getMainTopicNames(summary, topics, aspectCounts);
-  const neutralSummary = buildNeutralSummary(result, mainTopicNames);
   const dynamic = result.dynamic_analysis || {};
 
   const downloadReport = async (format) => {
@@ -433,40 +406,42 @@ export default function ResultPage() {
           </div>
           <div>
             <p className="text-gray-500">Основные темы</p>
-            <p className="text-white">{mainTopicNames.join(', ') || '—'}</p>
+            <p className="text-white">{mainTopicNames.join(', ') || 'Основные темы не определены'}</p>
           </div>
-        </div>
-        <div>
-          <p className="text-gray-500 text-sm mb-2">Краткое содержание</p>
-          <p className="text-gray-300 text-sm leading-relaxed">{neutralSummary}</p>
+          {responsibleSides.length > 0 && (
+            <div>
+              <p className="text-gray-500">Ответственные стороны</p>
+              <p className="text-white">{responsibleSides.join(', ')}</p>
+            </div>
+          )}
         </div>
       </Section>
 
       <Section title="Задачи">
-        {tasks.length ? (
-          <LimitedList items={tasks} limit={8} moreTitle="Показать все задачи" renderItem={(task, index) => (
-            <div key={index} className="bg-gray-800/50 rounded-lg p-4 text-sm">
-              <p className="text-white font-medium">{task.title || task.text}</p>
-              {task.summary && <p className="text-gray-300 mt-2">{compactText(task.summary, 260)}</p>}
-              <div className="mt-3 grid sm:grid-cols-2 gap-2 text-gray-400">
-                <p>Фрагмент: <span className="text-gray-200">{task.source_fragment || '—'}</span></p>
-                <p>Ответственный: <span className="text-gray-200">{task.responsible || 'не определён'}</span></p>
-                <p>Срок: <span className="text-gray-200">{task.deadline || 'не определён'}</span></p>
-                <p>Статус: <span className="text-gray-200">{taskStatus(task)}</span></p>
+          {tasks.length ? (
+            <LimitedList items={tasks} limit={8} moreTitle="Показать все задачи" renderItem={(task, index) => (
+              <div key={index} className="bg-gray-800/50 rounded-lg p-4 text-sm">
+                <p className="text-white font-medium">{task.title || task.text}</p>
+                {task.summary && <p className="text-gray-300 mt-2">{compactText(task.summary, 260)}</p>}
+                <div className="mt-3 grid sm:grid-cols-2 gap-2 text-gray-400">
+                  <p>Фрагмент: <span className="text-gray-200">{task.source_fragment || '—'}</span></p>
+                  <p>Ответственный: <span className="text-gray-200">{task.responsible || 'не определён'}</span></p>
+                  <p>Срок: <span className="text-gray-200">{task.deadline || 'не определён'}</span></p>
+                  <p>Статус: <span className="text-gray-200">{taskStatus(task)}</span></p>
+                </div>
+                {reviewMode && (
+                  <FeedbackControls
+                    actions={[
+                      { label: 'Верно', correctedLabel: 'task', predictedLabel: 'task' },
+                      { label: 'Не задача', correctedLabel: 'other', predictedLabel: 'task' },
+                      { label: 'Редактировать', correctedLabel: 'task', predictedLabel: 'task', edit: true },
+                    ]}
+                    onAction={(action) => submitFeedback('task', task, action)}
+                  />
+                )}
               </div>
-              {reviewMode && (
-                <FeedbackControls
-                  actions={[
-                    { label: 'Верно', correctedLabel: 'task', predictedLabel: 'task' },
-                    { label: 'Не задача', correctedLabel: 'other', predictedLabel: 'task' },
-                    { label: 'Редактировать', correctedLabel: 'task', predictedLabel: 'task', edit: true },
-                  ]}
-                  onAction={(action) => submitFeedback('task', task, action)}
-                />
-              )}
-            </div>
-          )} />
-        ) : <Empty text="Выделенные задачи не найдены." />}
+            )} />
+          ) : <Empty text="Выделенные задачи не найдены." />}
       </Section>
 
       <Section title="Вопросы и ответы">
@@ -579,7 +554,7 @@ export default function ResultPage() {
               <div key={index} className="bg-gray-800/50 rounded-lg p-3 text-sm mb-2">
                 <p className="text-white">{topic.topic_name}</p>
                 <p className="text-gray-400">Ключевые слова: {(topic.keywords || []).join(', ') || '—'}</p>
-                <p className="text-gray-500 text-xs">Фрагментов: {(topic.fragments || []).length}</p>
+                <p className="text-gray-500 text-xs">Фрагментов: {(topic.fragment_ids || topic.fragments || []).length}</p>
                 {reviewMode && (
                   <FeedbackControls
                     actions={[
@@ -634,7 +609,7 @@ export default function ResultPage() {
             <MetricCard label="Δ среднего тона" value={dynamic.average_sentiment_delta} />
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
               <p className="text-gray-400 text-xs">Повторяющиеся аспекты</p>
-              <p className="text-white text-sm mt-2">{(dynamic.repeated_topics || []).join(', ') || '—'}</p>
+              <p className="text-white text-sm mt-2">{(dynamic.repeated_topics || []).join(', ') || dynamic.repeated_topics_message || 'Повторяющиеся аспекты не определены.'}</p>
             </div>
           </div>
         ) : <p className="text-gray-500 text-sm">{dynamic.message || 'Для этой серии встреч пока нет истории для динамического анализа.'}</p>}

@@ -55,10 +55,87 @@ MARKERS = {
         "комиссия",
         "проверка",
         "черновик",
+        "консультация",
+        "семестр",
+        "пары",
+        "следующая встреча",
         "работа",
         "исследование",
     ],
+    "commercial_meeting": [
+        "договор",
+        "контракт",
+        "поставка",
+        "покупатель",
+        "продавец",
+        "поставщик",
+        "оплата",
+        "платеж",
+        "предоплата",
+        "отсрочка",
+        "аккредитив",
+        "банковская гарантия",
+        "цена",
+        "премия",
+        "дифференциал",
+    ],
+    "commercial_oil_gas": [
+        "brent",
+        "dated brent",
+        "брент",
+        "тонн",
+        "партия",
+        "отгрузка",
+        "коносамент",
+        "фрахт",
+        "демередж",
+        "чартер",
+        "терминал",
+        "судно",
+        "качество сырья",
+        "инспектор",
+    ],
+    "strategy_meeting": [
+        "стратегия",
+        "цель",
+        "приоритет",
+        "дорожная карта",
+        "позиционирование",
+        "рынок",
+        "рост",
+        "инициатива",
+    ],
+    "hr_meeting": [
+        "сотрудник",
+        "команда",
+        "найм",
+        "адаптация",
+        "мотивация",
+        "отпуск",
+        "грейд",
+        "онбординг",
+        "перформанс",
+    ],
+    "support_meeting": [
+        "обращение",
+        "тикет",
+        "инцидент",
+        "поддержка",
+        "ошибка клиента",
+        "sla",
+        "эскалация",
+        "жалоба",
+    ],
 }
+
+NON_MEETING_MARKERS = [
+    "поздравляю",
+    "дорогие коллеги",
+    "уважаемые",
+    "хочу обратиться",
+    "сегодня я расскажу",
+    "доклад посвящен",
+]
 
 
 def _iter_text(items_or_text: str | Iterable[dict]) -> str:
@@ -86,6 +163,17 @@ def detect_meeting_type(items_or_text: str | Iterable[dict]) -> dict:
                 scores[label] += count
                 matched[label].append(marker)
 
+    question_marks = text.count("?")
+    task_like = sum(text.count(marker) for marker in ("задач", "срок", "ответствен", "дедлайн", "подготов", "провер"))
+    non_meeting_hits = [marker for marker in NON_MEETING_MARKERS if marker in text]
+    if non_meeting_hits and question_marks == 0 and task_like < 2:
+        return {
+            "label": "non_meeting_speech",
+            "confidence": 0.72,
+            "matched_markers": non_meeting_hits[:8],
+            "scores": dict(scores),
+        }
+
     if not scores:
         return {
             "label": "general_discussion",
@@ -97,10 +185,28 @@ def detect_meeting_type(items_or_text: str | Iterable[dict]) -> dict:
     project = scores["project_meeting"]
     technical = scores["technical_research"]
     education = scores["education_consultation"]
+    commercial = scores["commercial_meeting"]
+    oil_gas = scores["commercial_oil_gas"]
     dominant, dominant_score = scores.most_common(1)[0]
     total = sum(scores.values())
+    education_priority = education >= 2 and any(
+        marker in matched["education_consultation"]
+        for marker in ("ВКР", "черновик", "страница", "консультация", "семестр", "пары", "следующая встреча")
+    )
 
-    if project >= 3 and (technical + education) >= 4:
+    if oil_gas >= 4 and commercial >= 2:
+        label = "commercial_oil_gas"
+        confidence = min(0.92, (oil_gas + commercial) / max(total, 1))
+        markers = sorted({*matched["commercial_oil_gas"], *matched["commercial_meeting"]})[:12]
+    elif commercial >= 4:
+        label = "commercial_meeting"
+        confidence = min(0.88, commercial / max(total, 1))
+        markers = matched["commercial_meeting"][:12]
+    elif education_priority:
+        label = "education_consultation" if education >= technical else "technical_research"
+        confidence = min(0.9, max(0.62, (education + technical) / max(total, 1)))
+        markers = sorted({*matched["education_consultation"], *matched["technical_research"]})[:12]
+    elif project >= 3 and (technical + education) >= 4:
         label = "mixed"
         confidence = min(0.9, (project + technical + education) / max(total, 1))
         markers = sorted({m for values in matched.values() for m in values})[:12]

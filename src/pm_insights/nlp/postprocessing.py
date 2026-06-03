@@ -4,11 +4,16 @@ import re
 from collections import Counter
 from typing import Any
 
+from pm_insights import settings
+
+from .deadline_extractor import classify_deadline_kind, find_deadlines
 from .decision_extractor import extract_agreements
 from .extraction_decision import build_review_items, score_task_candidate
 from .meeting_type import detect_meeting_type
+from .responsible_extractor import find_responsibles
 from .responsible_side import find_responsible_side
 from .task_extractor import is_real_task
+from .topic_modeling import DOMAIN_TEXT_LABELS, STOPWORDS as TOPIC_MODEL_STOPWORDS, TOPIC_CANDIDATE_LABELS
 
 
 TECHNICAL_TOPICS = {
@@ -28,6 +33,74 @@ TECHNICAL_TOPICS = {
     "генерализация",
     "ВКР",
 }
+TOPIC_FILLER_WORDS = {
+    "что-нибудь",
+    "какие-то",
+    "что-то",
+    "правило",
+    "сказали",
+    "спрашиваю",
+    "принципе",
+    "илья",
+    "получается",
+    "именно",
+    "собственно",
+    "отталкиваться",
+    "время",
+    "ну",
+    "да",
+    "нет",
+    "ага",
+    "типа",
+    "значит",
+    "короче",
+    "наверное",
+    "условно",
+    "говоря",
+    "какой-то",
+    "какая-то",
+    "кто-то",
+    "где-то",
+    "зачем-то",
+    "почему-то",
+    "чего-то",
+    "как-нибудь",
+    "чуть-чуть",
+    "хотел",
+    "хотели",
+    "посмотреть",
+    "спросить",
+    "сказал",
+    "понятно",
+    "знаю",
+    "этом",
+    "сути",
+    "эта",
+    "эту",
+    "больш",
+    "поэт",
+    "случайн",
+    "такая",
+    "только",
+    "как-то",
+    "влезет",
+    "смысл",
+    "кейс",
+    "говорил",
+    "просто",
+    "какой-нибудь",
+    "215-й",
+    "317-й",
+}
+TECHNICAL_TOPIC_LABEL_RULES = [
+    (("дебит", "дебет", "динамик", "метрокуб", "сутк", "давлен"), "Дебит и динамика"),
+    (("интерпретац", "данн", "эталон", "калькулирован", "аппроксим", "интерпол"), "Интерпретация данных"),
+    (("пласт", "проницаем", "скваж", "гидродинами", "параметр"), "Параметры пласта"),
+    (("скин", "трещин", "мгрп"), "Скин-фактор и трещины"),
+    (("модель", "аппроксим", "точност", "r-квадрат", "r2"), "Модель и аппроксимация"),
+    (("безразмер", "крив", "формул", "коэффициент"), "Безразмерные кривые"),
+    (("четверг", "встреч", "следующ", "пары", "семестр", "свободн"), "Организация следующей встречи"),
+]
 OIL_GAS_TOPICS = {
     "объемы поставки": ["объем", "тонн", "партия", "поставк"],
     "ценовая формула": ["brent", "брент", "dated", "формула", "премия", "дифференциал"],
@@ -47,7 +120,11 @@ MEETING_TYPE_LABELS = {
     "commercial_oil_gas": "нефтегазовая коммерческая встреча",
     "oil_gas_commercial": "нефтегазовая коммерческая встреча",
     "oil_gas_trading": "нефтегазовая коммерческая встреча",
+    "strategy_meeting": "стратегическая встреча",
+    "hr_meeting": "HR-встреча",
+    "support_meeting": "встреча поддержки / клиентский разбор",
     "general_discussion": "общее обсуждение",
+    "non_meeting_speech": "монолог / обращение",
     "mixed": "смешанная встреча",
     "unknown": "тип встречи не определен",
 }
@@ -59,9 +136,7 @@ COMMERCIAL_MARKERS = (
 )
 SECTION_LIMITS = {
     "tasks": 8,
-    "research_actions": 8,
     "recommendations": 8,
-    "research_notes": 8,
     "qa": 8,
     "deadlines": 10,
     "agreements": 8,
@@ -165,6 +240,32 @@ def _joined_text(result: dict) -> str:
     return " ".join(item.get("text", "") for item in units)
 
 
+def _participant_names_from_result(result: dict) -> list[str]:
+    metadata = result.get("metadata") or {}
+    meeting_info = metadata.get("meeting_info") or {}
+    raw_sources = [
+        metadata.get("participants"),
+        meeting_info.get("participants"),
+        result.get("participants"),
+    ]
+    names: list[str] = []
+    for source in raw_sources:
+        if isinstance(source, str):
+            for line in re.split(r"[\n;,]+", source):
+                name = re.split(r"\s+[—–-]\s+|\s*:\s*", line.strip(), maxsplit=1)[0].strip()
+                if name:
+                    names.append(name)
+        elif isinstance(source, list):
+            for item in source:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                else:
+                    name = str(item or "").strip()
+                if name:
+                    names.append(name)
+    return list(dict.fromkeys(names))
+
+
 def _is_technical_result(result: dict) -> bool:
     mt = result.get("meeting_type")
     if isinstance(mt, dict) and mt.get("label") in {"technical_research", "education_consultation", "mixed"}:
@@ -210,6 +311,22 @@ def _is_commercial_result(result: dict) -> bool:
     return hits >= 4
 
 
+def _is_education_priority_result(result: dict) -> bool:
+    joined = _joined_text(result).lower()
+    markers = (
+        "вкр",
+        "черновик",
+        "страниц",
+        "консультац",
+        "семестр",
+        "пары",
+        "следующ",
+        "научн",
+        "руководител",
+    )
+    return sum(1 for marker in markers if marker in joined) >= 2
+
+
 def _set_meeting_type(result: dict, label: str, confidence: float = 0.72) -> None:
     current = result.get("meeting_type")
     if isinstance(current, dict):
@@ -239,6 +356,12 @@ def _normalize_meeting_type(result: dict) -> None:
             _set_meeting_type(result, "commercial_meeting", 0.72)
         elif current_label == "mixed":
             _set_meeting_type(result, "mixed", 0.7)
+        return
+    if _is_education_priority_result(result):
+        joined = _joined_text(result).lower()
+        technical_hits = sum(1 for marker in ("дебит", "скин", "пласт", "модель", "безразмер", "интерпретац") if marker in joined)
+        label = "technical_research" if technical_hits >= 3 else "education_consultation"
+        _set_meeting_type(result, label, 0.78)
         return
     current = result.get("meeting_type")
     if isinstance(current, dict):
@@ -421,11 +544,1080 @@ def _source_fragment_for_text(result: dict, source_text: str | None, fallback: i
 
 
 def _normalize_title_key(text: str | None) -> str:
-    return re.sub(r"[^a-zа-яё0-9]+", " ", (text or "").lower()).strip()
+    return re.sub(r"[^a-zа-яё0-9]+", " ", (text or "").lower().replace("ё", "е")).strip()
 
 
 def _category_rank(category: str | None) -> int:
     return COMMERCIAL_CATEGORY_RANK.get((category or "").lower(), 100)
+
+
+BAD_DISPLAY_TOPIC_KEYS = {
+    "требования этой эту",
+    "причем понял честно",
+    "диаметр интересно случайный",
+    "минимизировать меньше связей",
+    "минимизировать максимизировать",
+    "только использую используют",
+    "вторник похожие",
+    "вторник вторник",
+    "пакете пакете",
+    "второкурсниками много",
+    "влезет смысле",
+    "16 го видно",
+    "имя технология",
+    "адекватным решение",
+    "пользоваться config raspberry",
+    "реальное снова написать",
+    "человек машина",
+    "постановке задачи",
+    "raspberry подключаться",
+    "даты рабочих контракте",
+    "рабочих контракте отгрузки поставки даты",
+}
+
+DISPLAY_TOPIC_EXACT_MAP = {
+    "пользоваться config raspberry": "Raspberry Pi и настройка окружения",
+    "raspberry подключаться": "Raspberry Pi и настройка окружения",
+    "камеры fps": "камеры и FPS",
+    "камер fps": "камеры и FPS",
+    "usb камер": "USB bandwidth и подключение камер",
+    "qemu виртуализация": "QEMU / виртуализация Raspberry Pi",
+    "второкурсниками много": "задачи для второкурсников",
+    "дебет время правило": "дебит и динамика",
+    "четверг отталкиваться сказали": "организация следующей встречи",
+    "диаметр интересно случайный": "диаметр и топология графа",
+}
+
+GENERIC_DISPLAY_TOPIC_KEYS = {
+    "модель",
+    "сервер",
+    "проблемы",
+    "дизайн",
+    "документация",
+    "сроки",
+    "ресурсы",
+    "бюджет",
+    "качество",
+    "вкр",
+}
+
+OIL_GAS_ONLY_TOPIC_KEYS = {
+    "параметры пласта",
+    "скин фактор и трещины",
+    "дебит и динамика",
+}
+
+COMMERCIAL_ONLY_TOPIC_KEYS = {
+    "премия и дифференциал",
+    "платежные условия",
+    "ценовая формула",
+    "фрахт и демередж",
+    "объемы поставки",
+    "качество сырья",
+    "brent",
+    "коносамент",
+    "судно",
+    "терминал",
+}
+
+RESEARCH_ONLY_TOPIC_KEYS = {
+    "интерпретация данных",
+}
+
+STRICT_OIL_GAS_CONTEXT_MARKERS = (
+    "нефть",
+    "газ",
+    "скважин",
+    "пласт",
+    "дебит",
+    "скин-фактор",
+    "скин фактор",
+    "трещин",
+    "коллектор",
+    "давлен",
+    "pvt",
+)
+
+NON_OIL_TECH_CONTEXT_MARKERS = (
+    "raspberry",
+    "orange pi",
+    "yolo",
+    "камер",
+    "benchmark",
+    "бенчмарк",
+    "qemu",
+    "второкурсник",
+    "датасет",
+    "opencv",
+)
+
+TECHNICAL_RESEARCH_CONTEXT_MARKERS = (
+    "вкр",
+    "исслед",
+    "модель",
+    "параметр",
+    "расчет",
+    "расчёт",
+    "данн",
+    "аппроксимац",
+    "формул",
+    "эксперимент",
+    "raspberry",
+    "orange pi",
+    "yolo",
+    "камер",
+    "benchmark",
+    "бенчмарк",
+    "qemu",
+    "датасет",
+    "opencv",
+)
+
+TECHNICAL_HARDWARE_CONTEXT_MARKERS = (
+    "raspberry",
+    "orange pi",
+    "yolo",
+    "камер",
+    "benchmark",
+    "бенчмарк",
+    "qemu",
+    "opencv",
+    "hailo",
+    "ai kit",
+    "fps",
+    "npu",
+    "microsd",
+    "usb bandwidth",
+)
+
+ARCHITECTURE_C4_CONTEXT_MARKERS = (
+    "c4",
+    "диаграмм",
+    "контейнер",
+    "компонент",
+    "systemd",
+    "timer",
+    "ldap",
+    "каталог",
+    "портал",
+    "консоль",
+    "инфраструктур",
+    "модульный монолит",
+    "клиент-сервер",
+    "архитектур",
+)
+
+GRAPH_VKR_CONTEXT_MARKERS = (
+    "граф",
+    "тополог",
+    "диаметр",
+    "связ",
+    "математическ",
+    "критер",
+    "оптимизац",
+    "телеметр",
+    "метрик",
+    "полносвязан",
+    "остовн",
+    "дерев",
+)
+
+EDUCATION_CONTEXT_MARKERS = (
+    "вкр",
+    "второкурсник",
+    "практик",
+    "консультац",
+    "семестр",
+    "пары",
+    "черновик",
+    "страниц",
+    "следующая встреч",
+)
+
+DISPLAY_TOPIC_STOPWORDS = TOPIC_FILLER_WORDS | set(TOPIC_MODEL_STOPWORDS) | {
+    "пакете",
+    "много",
+    "смысле",
+    "рабочих",
+    "контракте",
+}
+
+DOMAIN_BLOCKED_TOPIC_KEYS = {
+    "technical_hardware": OIL_GAS_ONLY_TOPIC_KEYS | {"интерпретация данных"},
+    "education_vkr": set(),
+}
+
+DOMAIN_CANDIDATE_LABELS = {
+    "technical_hardware": (
+        "Raspberry Pi 5 и Orange Pi",
+        "Raspberry Pi и настройка окружения",
+        "YOLO benchmark",
+        "модель детекции рук",
+        "камеры и FPS",
+        "датасеты и разметка",
+        "USB bandwidth и подключение камер",
+        "QEMU / виртуализация Raspberry Pi",
+        "AI Kit / Hailo accelerator",
+        "входные данные ML pipeline",
+        "формальная постановка задачи",
+        "перегрев и охлаждение Raspberry Pi",
+        "microSD и ресурс записи",
+        "задачи для второкурсников",
+        "документы по практике",
+        "организация практики",
+    ),
+    "architecture_c4": (
+        "архитектурная диаграмма C4",
+        "описание архитектуры в ВКР",
+        "systemd timer",
+        "инфраструктурный сервис",
+        "LDAP / каталог домена",
+        "компоненты и взаимодействия",
+        "внешние системы и пользователи",
+        "клиент-серверная архитектура",
+        "модульный монолит",
+        "локальные артефакты сервиса",
+        "sequence diagram",
+        "взаимодействие через каталог",
+        "ВКР и презентация",
+        "график презентации/встречи",
+    ),
+    "graph_vkr": (
+        "постановка задачи",
+        "диаметр и топология графа",
+        "математическая модель",
+        "аппроксимация метрик графа",
+        "количество связей",
+        "модель топологии сети",
+        "требования к ВКР",
+        "критерии качества",
+        "метрики графа",
+        "ограничения модели",
+        "сбор данных и телеметрия",
+        "входные данные математической модели",
+    ),
+    "education_vkr": (
+        "ВКР и документация",
+        "требования к ВКР",
+        "постановка задачи",
+        "цель и задачи ВКР",
+        "документы по практике",
+        "организация практики",
+        "задачи для второкурсников",
+        "организация следующей встречи",
+    ),
+    "oil_gas": (
+        "объемы поставки",
+        "партии поставки",
+        "ценовая формула",
+        "премия и дифференциал",
+        "платежные условия",
+        "сроки поставки и оплаты",
+        "логистика",
+        "фрахт и демередж",
+        "качество сырья",
+        "инспекция",
+        "хеджирование",
+        "комплаенс",
+        "опцион",
+    ),
+    "technical_research": (
+        "дебит и динамика",
+        "интерпретация данных",
+        "параметры пласта",
+        "скин-фактор и трещины",
+        "модель и аппроксимация",
+        "безразмерные кривые",
+        "организация следующей встречи",
+        "параметры модели",
+        "точность модели",
+        "устойчивость модели",
+        "данные и выборка",
+    ),
+    "project": (
+        "задачи и поручения",
+        "сроки",
+        "риски",
+        "статус работ",
+        "план работ",
+        "релиз",
+        "тестирование",
+        "сервер",
+        "авторизация",
+        "документация",
+        "аналитика",
+        "интеграция",
+    ),
+}
+
+_SEMANTIC_MODEL: Any | None = None
+_SEMANTIC_MODEL_UNAVAILABLE = False
+
+OIL_GAS_CONTEXT_MARKERS = (
+    "нефть",
+    "сырь",
+    "brent",
+    "брент",
+    "баррел",
+    "фрахт",
+    "демередж",
+    "коносамент",
+    "судно",
+    "терминал",
+    "плотност",
+    "сера",
+    "покупател",
+    "поставщик",
+    "контракт",
+    "платеж",
+    "платёж",
+    "пласт",
+    "скважин",
+    "дебит",
+)
+
+FINAL_TOPIC_LABEL_RULES = [
+    (("постановк", "задач"), "постановка задачи"),
+    (("требован", "вкр"), "требования к ВКР"),
+    (("формальн", "постановк"), "формальная постановка задачи"),
+    (("математ", "модел"), "математическая модель"),
+    (("аппроксимац", "метрик", "граф"), "аппроксимация метрик графа"),
+    (("тополог", "сет"), "модель топологии сети"),
+    (("ограничен", "модел"), "ограничения модели"),
+    (("критер", "качеств"), "критерии качества"),
+    (("критер", "оптимизац"), "критерии оптимизации"),
+    (("диаметр", "граф"), "диаметр и топология графа"),
+    (("метрик", "граф"), "метрики графа"),
+    (("количеств", "связ"), "количество связей"),
+    (("задерж", "блокиров"), "задержки и блокировки"),
+    (("телеметр", "данн"), "сбор данных и телеметрия"),
+    (("raspberry", "окружен"), "Raspberry Pi и настройка окружения"),
+    (("raspberry", "orange"), "Raspberry Pi 5 и Orange Pi"),
+    (("hailo",), "AI Kit / Hailo accelerator"),
+    (("arm", "совместим"), "ML-фреймворки и совместимость с ARM"),
+    (("tensorflow",), "TensorFlow / PyTorch / Keras"),
+    (("pytorch",), "TensorFlow / PyTorch / Keras"),
+    (("keras",), "TensorFlow / PyTorch / Keras"),
+    (("камер", "fps"), "камеры и FPS"),
+    (("real", "time", "inference"), "real-time inference"),
+    (("перегрев", "raspberry"), "перегрев и охлаждение Raspberry Pi"),
+    (("config", "raspberry"), "Raspberry config и CPU governor"),
+    (("cpu", "governor"), "Raspberry config и CPU governor"),
+    (("microsd",), "microSD и ресурс записи"),
+    (("usb", "камер"), "USB bandwidth и подключение камер"),
+    (("yolo",), "YOLO benchmark"),
+    (("датасет",), "датасеты и разметка"),
+    (("разметк",), "датасеты и разметка"),
+    (("входн", "ml"), "входные данные ML pipeline"),
+    (("ml", "pipeline"), "входные данные ML pipeline"),
+    (("перегрев",), "перегрев и охлаждение Raspberry Pi"),
+    (("npu",), "AI Kit / Hailo accelerator"),
+    (("детекц", "рук"), "модель детекции рук"),
+    (("qemu",), "QEMU / виртуализация Raspberry Pi"),
+    (("второкурсник",), "задачи для второкурсников"),
+    (("практик", "документ"), "документы по практике"),
+    (("презентац", "проект"), "презентация проекта"),
+    (("c4",), "архитектурная диаграмма C4"),
+    (("sequence", "diagram"), "sequence diagram"),
+    (("архитектур", "вкр"), "описание архитектуры в ВКР"),
+    (("инфраструктур", "сервис"), "инфраструктурный сервис"),
+    (("systemd", "timer"), "systemd timer"),
+    (("ldap",), "LDAP / каталог домена"),
+    (("клиент", "сервер"), "клиент-серверная архитектура"),
+    (("модульн", "монолит"), "модульный монолит"),
+    (("компонент", "взаимодейств"), "компоненты и взаимодействия"),
+    (("внешн", "систем"), "внешние системы и пользователи"),
+    (("plantuml",), "sequence diagram"),
+    (("каталог", "взаимодейств"), "взаимодействие через каталог"),
+    (("вкр", "презентац"), "ВКР и презентация"),
+    (("контроллер", "домен"), "каталог домена"),
+    (("организац", "практик"), "организация практики"),
+    (("договор", "организац"), "договор с организацией"),
+    (("срок", "практик"), "сроки оформления практики"),
+    (("тема", "вкр", "папк"), "тема ВКР и номер папки"),
+    (("введен", "вкр"), "введение ВКР"),
+    (("проблем", "исслед"), "проблема исследования"),
+    (("цель", "задач", "вкр"), "цель и задачи ВКР"),
+    (("термин",), "список терминов"),
+    (("active", "directory"), "Active Directory"),
+    (("импортозамещ",), "импортозамещение ПО"),
+    (("репликац", "тополог"), "репликация и топология"),
+    (("idf0",), "IDF0-схемы"),
+    (("a0", "декомпоз"), "A0-декомпозиция"),
+    (("входн", "данн", "мод"), "входные данные математической модели"),
+    (("входн", "выходн", "модул"), "входные и выходные данные модулей"),
+    (("иерархическ", "каталог"), "иерархический каталог как база данных"),
+    (("локальн", "реплицир"), "локальная и реплицируемая область каталога"),
+    (("централиз", "децентрализ"), "централизованные и децентрализованные решения"),
+    (("слабоформализ",), "формализация слабоформализуемой задачи"),
+    (("транскрипц", "конспект"), "сравнение транскрипции и конспекта"),
+    (("суммаризац",), "качество автоматической суммаризации"),
+    (("python", "каталог"), "Python-сервис для работы с каталогом"),
+    (("kerberos",), "Kerberos-авторизация"),
+    (("каталог", "домен"), "каталог домена"),
+    (("внутрисайтов", "тополог"), "внутрисайтовая топология"),
+    (("межсайтов", "тополог"), "межсайтовая топология"),
+    (("старост", "связ"), "старость связей"),
+    (("small", "world"), "Small World model"),
+    (("задерж", "репликац"), "задержки репликации"),
+    (("блокиров", "репликац"), "блокировки репликации"),
+    (("модел", "репликац"), "модель репликации"),
+    (("остовн", "дерев"), "минимальное остовное дерево"),
+    (("вес", "канал"), "веса каналов"),
+    (("ping",), "ping и hop count"),
+    (("hop", "count"), "ping и hop count"),
+    (("расписан", "связ"), "расписания связей"),
+    (("внутрисайтов", "межсайтов", "алгоритм"), "различия внутрисайтового и межсайтового алгоритмов"),
+    (("mvp", "алгоритм"), "MVP с двумя алгоритмами"),
+    (("документ", "отчет"), "документ ВКР и отчёт"),
+]
+
+
+def _topic_words(text: str | None) -> list[str]:
+    return re.findall(r"[A-Za-zА-Яа-яЁё0-9-]{3,}", (text or "").lower())
+
+
+def _semantic_token_stem(word: str) -> str:
+    normalized = word.lower().replace("ё", "е").strip("-")
+    for prefix in (
+        "второкурсник",
+        "поставк",
+        "отгруз",
+        "платеж",
+        "платеж",
+        "raspberry",
+        "benchmark",
+        "камер",
+        "пласт",
+        "скин",
+        "трещин",
+        "дебит",
+        "данн",
+        "модел",
+        "параметр",
+        "документ",
+        "практик",
+    ):
+        if normalized.startswith(prefix):
+            return prefix
+    for suffix in (
+        "иями",
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ыми",
+        "ими",
+        "иях",
+        "ях",
+        "ах",
+        "ов",
+        "ев",
+        "ей",
+        "ам",
+        "ям",
+        "ом",
+        "ем",
+        "ой",
+        "ый",
+        "ий",
+        "ая",
+        "ое",
+        "ые",
+        "у",
+        "а",
+        "ы",
+        "и",
+        "е",
+    ):
+        if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 4:
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _display_topic_tokens(text: str | None) -> list[str]:
+    tokens = []
+    for word in _topic_words(text):
+        normalized = _semantic_token_stem(word)
+        if normalized and normalized not in DISPLAY_TOPIC_STOPWORDS and not normalized.isdigit():
+            tokens.append(normalized)
+    return tokens
+
+
+def _normalize_display_keywords(value: Any, limit: int = 8) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates = re.split(r"[,;|/\n]+", value)
+        if len(candidates) == 1:
+            candidates = value.split()
+    elif isinstance(value, dict):
+        candidates = [value.get("word"), value.get("keyword"), value.get("text"), value.get("name")]
+    else:
+        candidates = list(value) if isinstance(value, (list, tuple, set)) else [value]
+
+    flattened: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            flattened.extend(
+                str(candidate.get(key) or "")
+                for key in ("word", "keyword", "text", "name")
+                if candidate.get(key)
+            )
+        elif candidate is not None:
+            flattened.append(str(candidate))
+
+    joined_chars = "".join(part for part in flattened if len(part.strip()) == 1)
+    if len(joined_chars) >= 4 and len(flattened) >= len(joined_chars):
+        flattened.append(joined_chars)
+
+    result: list[str] = []
+    for text in flattened:
+        phrase = re.sub(r"\s+", " ", str(text or "").strip(" ,.;:")).strip()
+        if not phrase:
+            continue
+        tokens = _display_topic_tokens(phrase)
+        if not tokens and phrase.lower() not in DISPLAY_TOPIC_STOPWORDS:
+            tokens = [phrase.lower()]
+        clean = " ".join(tokens) if len(tokens) > 1 else (tokens[0] if tokens else "")
+        if not clean or len(clean) < 3:
+            continue
+        if _looks_like_bad_phrase_topic(clean):
+            continue
+        if clean not in result:
+            result.append(clean)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _semantic_embedding_model() -> Any | None:
+    global _SEMANTIC_MODEL, _SEMANTIC_MODEL_UNAVAILABLE
+    if _SEMANTIC_MODEL_UNAVAILABLE:
+        return None
+    if _SEMANTIC_MODEL is not None:
+        return _SEMANTIC_MODEL
+    model_name = getattr(settings, "TOPIC_EMBEDDING_MODEL", "")
+    if not model_name:
+        _SEMANTIC_MODEL_UNAVAILABLE = True
+        return None
+    is_local_path = str(model_name).startswith((".", "/", "\\")) or bool(re.match(r"^[A-Za-z]:", str(model_name)))
+    if not is_local_path and "/" in str(model_name):
+        _SEMANTIC_MODEL_UNAVAILABLE = True
+        return None
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        kwargs = {}
+        try:
+            _SEMANTIC_MODEL = SentenceTransformer(model_name, **kwargs)
+        except TypeError:
+            if kwargs:
+                _SEMANTIC_MODEL_UNAVAILABLE = True
+                return None
+            _SEMANTIC_MODEL = SentenceTransformer(model_name)
+        return _SEMANTIC_MODEL
+    except Exception:
+        _SEMANTIC_MODEL_UNAVAILABLE = True
+        return None
+
+
+def _cosine_similarity(vec_a: Any, vec_b: Any) -> float:
+    try:
+        numerator = float(sum(float(a) * float(b) for a, b in zip(vec_a, vec_b, strict=False)))
+        norm_a = sum(float(a) * float(a) for a in vec_a) ** 0.5
+        norm_b = sum(float(b) * float(b) for b in vec_b) ** 0.5
+        if not norm_a or not norm_b:
+            return 0.0
+        return numerator / (norm_a * norm_b)
+    except Exception:
+        return 0.0
+
+
+def _lexical_semantic_similarity(text_a: str | None, text_b: str | None) -> float:
+    tokens_a = set(_display_topic_tokens(text_a))
+    tokens_b = set(_display_topic_tokens(text_b))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    overlap = tokens_a & tokens_b
+    if not overlap:
+        return 0.0
+    return len(overlap) / ((len(tokens_a) * len(tokens_b)) ** 0.5)
+
+
+def _label_markers(label: str | None) -> set[str]:
+    key = _normalize_title_key(label)
+    markers: set[str] = set()
+    for source in (DOMAIN_TEXT_LABELS, TOPIC_CANDIDATE_LABELS):
+        for candidate, candidate_markers in source.items():
+            if _normalize_title_key(candidate) == key:
+                markers.update(str(marker).lower().replace("ё", "е") for marker in candidate_markers)
+    for rule_markers, candidate in FINAL_TOPIC_LABEL_RULES:
+        if _normalize_title_key(candidate) == key:
+            markers.update(str(marker).lower().replace("ё", "е") for marker in rule_markers)
+    for rule_markers, candidate in TECHNICAL_TOPIC_LABEL_RULES:
+        if _normalize_title_key(candidate) == key:
+            markers.update(str(marker).lower().replace("ё", "е") for marker in rule_markers)
+    return markers
+
+
+def _label_marker_supported(label: str | None, evidence: str | None, *, min_hits: int = 1) -> bool:
+    markers = _label_markers(label)
+    if not markers:
+        return False
+    haystack = str(evidence or "").lower().replace("ё", "е")
+    tokens = set(_display_topic_tokens(evidence))
+    hits = 0
+    for marker in markers:
+        marker_stem = _semantic_token_stem(marker)
+        if marker in haystack or marker_stem in tokens:
+            hits += 1
+    return hits >= min_hits
+
+
+def semantic_similarity(text_a: str | None, text_b: str | None) -> float:
+    left = re.sub(r"\s+", " ", str(text_a or "")).strip()
+    right = re.sub(r"\s+", " ", str(text_b or "")).strip()
+    if not left or not right:
+        return 0.0
+    lexical = _lexical_semantic_similarity(left, right)
+    if lexical >= 0.55:
+        return lexical
+    model = _semantic_embedding_model()
+    if model is None:
+        return lexical
+    try:
+        embeddings = model.encode([left, right], show_progress_bar=False)
+        return max(lexical, _cosine_similarity(embeddings[0], embeddings[1]))
+    except Exception:
+        return lexical
+
+
+def is_semantically_supported_label(label: str | None, evidence: str | None, threshold: float = 0.35) -> bool:
+    key = _normalize_title_key(label)
+    if not key:
+        return False
+    if key in BAD_DISPLAY_TOPIC_KEYS:
+        return False
+    if _label_marker_supported(label, evidence, min_hits=1):
+        return True
+    if key in OIL_GAS_ONLY_TOPIC_KEYS:
+        return semantic_similarity(label, evidence) >= max(threshold, 0.42)
+    return semantic_similarity(label, evidence) >= threshold
+
+
+def _semantic_candidate_labels(domains: set[str]) -> list[str]:
+    labels: list[str] = []
+    for domain in ("technical_hardware", "architecture_c4", "graph_vkr", "education_vkr", "oil_gas", "technical_research", "project"):
+        if domain in domains:
+            labels.extend(DOMAIN_CANDIDATE_LABELS.get(domain, ()))
+    labels.extend(DOMAIN_TEXT_LABELS.keys())
+    labels.extend(TOPIC_CANDIDATE_LABELS.keys())
+    labels.extend(label for _markers, label in FINAL_TOPIC_LABEL_RULES)
+    return list(dict.fromkeys(labels))
+
+
+def choose_semantic_label(
+    evidence: str | None,
+    candidate_labels: list[str] | tuple[str, ...],
+    fallback_keywords: list[str] | None = None,
+) -> str | None:
+    evidence_text = str(evidence or "").strip()
+    best_label = None
+    best_score = 0.0
+    for label in candidate_labels:
+        score = max(semantic_similarity(label, evidence_text), 0.58 if _label_marker_supported(label, evidence_text) else 0.0)
+        if score > best_score:
+            best_label = label
+            best_score = score
+    if best_label and best_score >= 0.35:
+        return best_label
+    keywords = _normalize_display_keywords(fallback_keywords or [], 4)
+    if len(keywords) >= 2:
+        return _sentence_case(" ".join(keywords[:3]))
+    return None
+
+
+def build_topic_evidence(topic_or_aspect: dict | None, transcript_segments: list[dict] | None, result: dict | None = None) -> str:
+    item = topic_or_aspect or {}
+    parts: list[str] = []
+    for key in ("topic_name", "title", "name"):
+        if item.get(key):
+            parts.append(str(item[key]))
+    for key in ("source_text", "summary", "text"):
+        if item.get(key):
+            parts.append(str(item[key]))
+    if item.get("keywords"):
+        parts.append(" ".join(_normalize_display_keywords(item.get("keywords"), 12)))
+    fragment_ids = set(item.get("fragment_ids") or item.get("fragments") or [])
+    for index, segment in enumerate(transcript_segments or [], start=1):
+        fragment_id = segment.get("fragment_index") or segment.get("source_fragment") or index
+        if fragment_ids and fragment_id not in fragment_ids:
+            continue
+        text = str(segment.get("text") or "").strip()
+        if text:
+            parts.append(text)
+        if fragment_ids and len(parts) >= 8:
+            break
+    if not parts and result is not None:
+        parts.append(_joined_text(result)[:3000])
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def detect_meeting_domains(transcript: str | dict | None = None, metadata: dict | None = None, meeting_type: str | None = None) -> set[str]:
+    if isinstance(transcript, dict):
+        haystack = _joined_text(transcript)
+        meeting = transcript.get("meeting_type")
+        if isinstance(meeting, dict):
+            meeting_type = meeting.get("label") or meeting_type
+        elif isinstance(meeting, str):
+            meeting_type = meeting or meeting_type
+        metadata = transcript.get("metadata") or metadata
+    else:
+        haystack = str(transcript or "")
+    haystack = " ".join([haystack, str(metadata or "")]).lower().replace("ё", "е")
+    domains: set[str] = set()
+    if any(marker in haystack for marker in TECHNICAL_HARDWARE_CONTEXT_MARKERS):
+        domains.add("technical_hardware")
+    if any(marker in haystack for marker in ARCHITECTURE_C4_CONTEXT_MARKERS):
+        domains.add("architecture_c4")
+    if any(marker in haystack for marker in GRAPH_VKR_CONTEXT_MARKERS):
+        domains.add("graph_vkr")
+    if any(marker in haystack for marker in EDUCATION_CONTEXT_MARKERS):
+        domains.add("education_vkr")
+    if meeting_type in {"technical_research", "education_consultation"} or any(marker in haystack for marker in TECHNICAL_RESEARCH_CONTEXT_MARKERS):
+        domains.add("technical_research")
+    if meeting_type in {"project_meeting"}:
+        domains.add("project")
+    if meeting_type in {"commercial_meeting", "commercial_oil_gas", "oil_gas_commercial"}:
+        domains.add("commercial")
+    strict_oil = any(marker in haystack for marker in STRICT_OIL_GAS_CONTEXT_MARKERS)
+    if strict_oil and "technical_hardware" not in domains:
+        domains.add("oil_gas")
+    if meeting_type in {"commercial_oil_gas", "oil_gas_commercial", "oil_gas_trading"} and "technical_hardware" not in domains:
+        domains.add("oil_gas")
+    if not domains:
+        domains.add("general")
+    return domains
+
+
+def topic_allowed_for_domains(
+    topic: str | None,
+    keywords: list[str] | None,
+    evidence: str | None,
+    domains: set[str],
+) -> bool:
+    key = _normalize_title_key(topic)
+    evidence_lower = str(evidence or "").lower().replace("ё", "е")
+    keyword_text = " ".join(keywords or []).lower().replace("ё", "е")
+    if not key:
+        return False
+    if key in BAD_DISPLAY_TOPIC_KEYS:
+        return False
+    if key in COMMERCIAL_ONLY_TOPIC_KEYS and not ({"commercial", "oil_gas"} & domains):
+        return False
+    if "technical_hardware" in domains and key in DOMAIN_BLOCKED_TOPIC_KEYS.get("technical_hardware", set()) and "oil_gas" not in domains:
+        return False
+    if "technical_hardware" in domains and key in {"входные данные математической модели", "модель топологии сети"}:
+        return False
+    if "architecture_c4" in domains and "graph_vkr" not in domains:
+        if key in {"данные и выборка", "интерпретация данных", "точность модели", "входные данные математической модели", "модель топологии сети"}:
+            return False
+        if key == "организация следующей встречи" and not re.search(r"\b(?:вторник|понедельник|встреч|созвон)\b", evidence_lower):
+            return False
+    if key == "организация следующей встречи" and ({"technical_hardware", "architecture_c4", "graph_vkr"} & domains):
+        return False
+    if "graph_vkr" in domains:
+        graph_evidence_without_label = evidence_lower.replace("описание архитектуры в вкр", "")
+        if key == "описание архитектуры в вкр" and not re.search(r"\b(?:c4|архитектур|диаграмм|контейнер|компонент)\b", graph_evidence_without_label):
+            return False
+    oil_specific_text = f"{key} {keyword_text}"
+    if "oil_gas" not in domains and any(
+        marker in oil_specific_text
+        for marker in ("пласт", "скин", "трещин", "скважин", "коллектор", "pvt")
+    ):
+        return False
+    if key in OIL_GAS_ONLY_TOPIC_KEYS and "oil_gas" not in domains:
+        if key == "дебит и динамика" and "technical_research" in domains and "technical_hardware" not in domains:
+            return True
+        return False
+    if key in RESEARCH_ONLY_TOPIC_KEYS and not ({"technical_research", "education_vkr", "oil_gas"} & domains):
+        return False
+    if key in RESEARCH_ONLY_TOPIC_KEYS and "architecture_c4" in domains and "graph_vkr" not in domains:
+        return False
+    if key in OIL_GAS_ONLY_TOPIC_KEYS and not any(marker in f"{evidence_lower} {keyword_text}" for marker in STRICT_OIL_GAS_CONTEXT_MARKERS):
+        return False
+    return True
+
+
+def semantic_clean_topic_or_aspect(
+    item: dict,
+    evidence: str,
+    domains: set[str],
+    result: dict | None = None,
+) -> dict | None:
+    raw_name = str(item.get("topic_name") or item.get("title") or item.get("name") or "").strip()
+    raw_key = _normalize_title_key(raw_name)
+    keywords = _normalize_display_keywords(item.get("keywords"), 8)
+    source_text = evidence or item.get("source_text") or ""
+    raw_keyword_text = " ".join(keywords).lower().replace("ё", "е")
+    if raw_key in OIL_GAS_ONLY_TOPIC_KEYS and "oil_gas" not in domains:
+        if not (raw_key == "дебит и динамика" and "technical_research" in domains and "technical_hardware" not in domains):
+            return None
+    if "oil_gas" not in domains and any(
+        marker in f"{raw_key} {raw_keyword_text}"
+        for marker in ("пласт", "скин", "трещин", "скважин", "коллектор", "pvt")
+    ):
+        return None
+    normalized = _final_display_topic_name(raw_name, keywords, source_text, result or {})
+    if not normalized:
+        normalized = choose_semantic_label(source_text, _semantic_candidate_labels(domains), keywords)
+    if not normalized:
+        return None
+    if not topic_allowed_for_domains(normalized, keywords, source_text, domains):
+        return None
+    if _looks_like_bad_phrase_topic(normalized):
+        repaired = choose_semantic_label(source_text, _semantic_candidate_labels(domains), keywords)
+        if not repaired or not topic_allowed_for_domains(repaired, keywords, source_text, domains):
+            return None
+        normalized = repaired
+    if not is_semantically_supported_label(normalized, source_text):
+        repaired = choose_semantic_label(source_text, _semantic_candidate_labels(domains), keywords)
+        if repaired and topic_allowed_for_domains(repaired, keywords, source_text, domains):
+            normalized = repaired
+        elif _normalize_title_key(raw_name) in BAD_DISPLAY_TOPIC_KEYS or _normalize_title_key(normalized) in OIL_GAS_ONLY_TOPIC_KEYS:
+            return None
+    return {
+        "title": normalized,
+        "keywords": keywords,
+        "source_text": source_text,
+        "semantic_similarity": round(semantic_similarity(normalized, source_text), 3),
+    }
+
+
+def _technical_topic_label(name: str | None, keywords: list[str] | None = None, source_text: str | None = None) -> str | None:
+    haystack = " ".join([name or "", " ".join(keywords or []), source_text or ""]).lower()
+    primary = " ".join([name or "", " ".join(keywords or [])]).lower()
+    best_label = None
+    best_score = 0
+    for markers, label in TECHNICAL_TOPIC_LABEL_RULES:
+        total_hits = sum(1 for marker in markers if marker in haystack)
+        if not total_hits:
+            continue
+        primary_hits = sum(1 for marker in markers if marker in primary)
+        score = primary_hits * 3 + total_hits
+        if score > best_score:
+            best_label = label
+            best_score = score
+    return best_label
+
+
+COMMERCIAL_TOPIC_EXACT_MAP = {
+    "даты рабочих контракте": "сроки поставки и оплаты",
+    "рабочих контракте отгрузки поставки даты": "сроки поставки и оплаты",
+    "даты платежей": "платежные условия",
+}
+COMMERCIAL_TIMING_TOPIC_MARKERS = (
+    "рабоч",
+    "контракт",
+    "отгруз",
+    "поставк",
+    "дат",
+    "календар",
+    "платеж",
+    "платёж",
+    "оплат",
+    "срок",
+)
+COMMERCIAL_PAYMENT_TOPIC_MARKERS = (
+    "платеж",
+    "платёж",
+    "оплат",
+    "предоплат",
+    "отсроч",
+    "гарант",
+    "аккредитив",
+)
+
+
+def _commercial_topic_label(name: str | None, keywords: list[str] | None = None, source_text: str | None = None) -> str | None:
+    haystack = " ".join([name or "", " ".join(keywords or []), source_text or ""]).lower().replace("ё", "е")
+    exact_key = _normalize_title_key(name)
+    if exact_key in COMMERCIAL_TOPIC_EXACT_MAP:
+        return COMMERCIAL_TOPIC_EXACT_MAP[exact_key]
+    if "за 5 рабочих" in haystack and "отгруз" in haystack:
+        return "сроки поставки и оплаты"
+    timing_hits = sum(1 for marker in COMMERCIAL_TIMING_TOPIC_MARKERS if marker in haystack)
+    payment_hits = sum(1 for marker in COMMERCIAL_PAYMENT_TOPIC_MARKERS if marker in haystack)
+    if payment_hits >= 2 and payment_hits > timing_hits:
+        return "платежные условия"
+    if timing_hits >= 3:
+        return "сроки поставки и оплаты"
+    return None
+
+
+def _domain_topic_label(name: str | None, keywords: list[str] | None = None, source_text: str | None = None) -> str | None:
+    haystack = " ".join([name or "", " ".join(keywords or []), source_text or ""]).lower().replace("ё", "е")
+    primary = " ".join([name or "", " ".join(keywords or [])]).lower().replace("ё", "е")
+    best_label = None
+    best_score = 0
+    for markers, label in FINAL_TOPIC_LABEL_RULES:
+        if not all(marker in haystack for marker in markers):
+            continue
+        primary_hits = sum(1 for marker in markers if marker in primary)
+        total_hits = sum(1 for marker in markers if marker in haystack)
+        score = primary_hits * 3 + total_hits
+        if score > best_score:
+            best_label = label
+            best_score = score
+    return best_label
+
+
+def _contextual_display_topic_label(
+    name: str | None,
+    keywords: list[str] | None,
+    source_text: str | None,
+    result: dict,
+) -> str | None:
+    domains = detect_meeting_domains(result)
+    key = _normalize_title_key(name)
+    haystack = " ".join([name or "", " ".join(keywords or []), source_text or "", _joined_text(result)[:2500]])
+    haystack = haystack.lower().replace("ё", "е")
+    if re.search(r"\bвходн\w*\s+и\s+выходн\w+\s+данн\w+\s+модул", key):
+        if "technical_hardware" in domains:
+            if re.search(r"\b(?:формальн\w+\s+постановк|постановк\w+\s+задач)\b", haystack):
+                return "формальная постановка задачи"
+            return "входные данные ML pipeline"
+        if re.search(r"\b(?:граф|тополог|диаметр|связ|метрик|математическ)\b", haystack):
+            return "входные данные математической модели"
+        if re.search(r"\b(?:c4|контейнер|компонент|диаграмм|взаимодейств|архитектур|каталог|ldap)\b", haystack):
+            return "компоненты и взаимодействия"
+    if "technical_hardware" in domains:
+        if key == "входные данные математической модели":
+            if re.search(r"\b(?:формальн\w+\s+постановк|постановк\w+\s+задач)\b", haystack):
+                return "формальная постановка задачи"
+            return "входные данные ML pipeline"
+        if key in {"входные данные математической модели", "модель топологии сети"}:
+            return None
+        if key == "организация следующей встречи":
+            if re.search(r"\b(?:термопаст|оборудован|камер|raspberry|benchmark|датасет)\b", haystack):
+                return "график работы с оборудованием"
+            return None
+        if key == "постановка задачи" and re.search(r"\b(?:формальн|входн|ml|pipeline)\b", haystack):
+            return "формальная постановка задачи"
+    if "architecture_c4" in domains:
+        if key in {"входные данные математической модели", "модель топологии сети"}:
+            return None
+        if key in {"данные и выборка", "интерпретация данных"}:
+            if re.search(r"\b(?:админ|портал|консоль|каталог|ldap|пользовател|внешн\w+\s+систем)\b", haystack):
+                return "внешние системы и пользователи"
+            if re.search(r"\b(?:c4|контейнер|компонент|диаграмм|взаимодейств|архитектур)\b", haystack):
+                return "компоненты и взаимодействия"
+            return None
+        if key == "входные и выходные данные модулей":
+            return "компоненты и взаимодействия"
+        if key in {"точность модели", "организация следующей встречи"}:
+            if re.search(r"\b(?:вторник|понедельник|встреч|созвон)\b", haystack):
+                return "график презентации/встречи"
+            return None
+        if key == "документ вкр и отчет":
+            return "ВКР и презентация"
+        if key == "требования к вкр" and re.search(r"\b(?:c4|архитектур|диаграмм|компонент|каталог|ldap|systemd)\b", haystack):
+            return "описание архитектуры в ВКР"
+    if "graph_vkr" in domains:
+        if key == "входные и выходные данные модулей":
+            return "входные данные математической модели"
+        if key == "модель и аппроксимация":
+            if re.search(r"\b(?:аппроксимац|приближен)\b", haystack) and re.search(r"\b(?:граф|метрик|диаметр|связ)\b", haystack):
+                return "аппроксимация метрик графа"
+            if re.search(r"\b(?:граф|тополог|диаметр|связ|метрик|математическ)\b", haystack):
+                return "математическая модель"
+        if key in {"вкр и документация", "документ вкр и отчет"}:
+            return "требования к ВКР"
+        if key == "интерпретация данных" and re.search(r"\b(?:граф|тополог|диаметр|связ|метрик)\b", haystack):
+            return "метрики графа"
+    return None
+
+
+def _has_oil_gas_context(result: dict, name: str | None = None, keywords: list[str] | None = None, source_text: str | None = None) -> bool:
+    mt = result.get("meeting_type")
+    haystack = " ".join([_joined_text(result), source_text or ""]).lower().replace("ё", "е")
+    strict_hit = any(marker in haystack for marker in STRICT_OIL_GAS_CONTEXT_MARKERS)
+    if strict_hit:
+        return True
+    if any(marker in haystack for marker in NON_OIL_TECH_CONTEXT_MARKERS):
+        return False
+    if isinstance(mt, dict) and mt.get("label") in {"commercial_oil_gas", "oil_gas_commercial", "oil_gas_trading"}:
+        return True
+    if any(marker in haystack for marker in OIL_GAS_CONTEXT_MARKERS):
+        return True
+    return False
+
+
+def _has_technical_research_context(result: dict, source_text: str | None = None) -> bool:
+    mt = result.get("meeting_type")
+    if isinstance(mt, dict) and mt.get("label") in {"technical_research", "education_consultation"}:
+        return True
+    haystack = " ".join([_joined_text(result), source_text or ""]).lower().replace("ё", "е")
+    return any(marker in haystack for marker in TECHNICAL_RESEARCH_CONTEXT_MARKERS)
+
+
+def _is_filler_topic_name(name: str | None) -> bool:
+    words = _topic_words(name)
+    if not words:
+        return True
+    filler_hits = sum(1 for word in words if word in TOPIC_FILLER_WORDS)
+    return filler_hits >= max(1, len(words) - 1)
+
+
+def _looks_like_bad_phrase_topic(name: str | None) -> bool:
+    key = _normalize_title_key(name)
+    if key in BAD_DISPLAY_TOPIC_KEYS:
+        return True
+    words = _topic_words(name)
+    if len(words) >= 2 and len(set(words)) <= max(1, len(words) // 2):
+        return True
+    filler_hits = sum(1 for word in words if word in TOPIC_FILLER_WORDS)
+    return filler_hits >= 2 and filler_hits >= len(words) // 2
+
+
+def _final_display_topic_name(name: str | None, keywords: list[str] | None, source_text: str | None, result: dict) -> str | None:
+    raw = str(name or "").strip()
+    if not raw and keywords:
+        raw = " ".join(keywords[:3])
+    if not raw:
+        return None
+
+    key = _normalize_title_key(raw)
+    commercial = _is_commercial_result(result) or _is_oil_gas_result(result)
+    exact_title = DISPLAY_TOPIC_EXACT_MAP.get(key)
+    contextual_title = _contextual_display_topic_label(raw, keywords, source_text, result)
+    commercial_title = _commercial_topic_label(raw, keywords, source_text) if commercial else None
+    domain_title = _domain_topic_label(raw, keywords, source_text) or _technical_topic_label(raw, keywords, source_text)
+
+    candidate = exact_title or contextual_title or commercial_title or domain_title
+    if key in COMMERCIAL_ONLY_TOPIC_KEYS and not commercial:
+        return None
+    if key in OIL_GAS_ONLY_TOPIC_KEYS and not _has_oil_gas_context(result, raw, keywords, source_text):
+        return None
+    if key in BAD_DISPLAY_TOPIC_KEYS:
+        return candidate
+    if key in GENERIC_DISPLAY_TOPIC_KEYS:
+        return candidate
+    if _looks_like_bad_phrase_topic(raw):
+        return candidate
+
+    normalized = candidate or _sentence_case(raw)
+    normalized_key = _normalize_title_key(normalized)
+    if normalized_key in COMMERCIAL_ONLY_TOPIC_KEYS and not commercial:
+        return None
+    if normalized_key in OIL_GAS_ONLY_TOPIC_KEYS and not _has_oil_gas_context(result, raw, keywords, source_text):
+        return None
+    if normalized_key in RESEARCH_ONLY_TOPIC_KEYS and not _has_technical_research_context(result, source_text):
+        return None
+    if normalized_key in GENERIC_DISPLAY_TOPIC_KEYS and not candidate:
+        return None
+    return normalized
 
 
 def _deadline_key(value: str | None) -> str:
@@ -448,8 +1640,23 @@ def _deadline_family_key(value: str | None) -> str:
 
 def _canonical_deadline_value(value: str | None, source_text: str | None = None) -> str | None:
     haystack = f"{source_text or ''} {value or ''}"
+    haystack_lower = haystack.lower()
+    clean_value = re.sub(r"\s+", " ", (value or "").strip())
     if re.search(r"минимум\s+за\s+(?:5|пять)\s+рабоч\w*\s+дн\w*\s+до\s+отгрузк\w*", haystack, re.IGNORECASE):
         return "минимум за 5 рабочих дней до отгрузки"
+    if re.search(r"\bследующ(?:ая|ей)\s+недел[яе]\b|\bна\s+следующей\s+неделе\b", haystack_lower):
+        if re.search(r"\bследующ(?:ая|ей)\s+недел[яе]\b|\bна\s+следующей\s+неделе\b", value or "", re.IGNORECASE):
+            return "на следующей неделе"
+    if re.search(r"\bчетверг\b", haystack_lower) and re.search(r"\b(?:7[.:]30|19[.:]30)\b", haystack_lower):
+        return "четверг 19:30"
+    if re.fullmatch(r"\s*7[.:]30\s*", value or ""):
+        if re.search(r"\b(встреч|созвон|четверг|после\s+7|вечер)\w*\b", haystack_lower):
+            return "19:30"
+        return "7:30"
+    if re.fullmatch(r"\s*19[.:]30\s*", value or ""):
+        return "19:30"
+    if re.fullmatch(r"(?:в|во|к)\s+\w+", clean_value, re.IGNORECASE) or clean_value.lower() in {"завтра", "в следующий раз", "через месяц"}:
+        return clean_value[:1].lower() + clean_value[1:]
     return value
 
 
@@ -476,12 +1683,103 @@ def _deadline_seen_index(clean_deadlines: list[dict], value: str | None) -> int 
     return None
 
 
+HISTORICAL_DATE_CONTEXT_RE = re.compile(
+    r"\b(ходили|смотрели|разбирались|тогда\s+делал|две\s+недели\s+назад|в\s+прошлый\s+раз|"
+    r"раньше|уже\s+было|уже\s+ходили|уже\s+смотрели|уже\s+разбирались)\b",
+    re.IGNORECASE,
+)
+FUTURE_DEADLINE_CONTEXT_RE = re.compile(
+    r"\b(завтра|к\s+выходным|в\s+следующий\s+раз|"
+    r"снова\s+прийти|отправим|отправить|будем\s+работать|привести|надо\s+прийти|презентац|"
+    r"надо\s+выдать|через\s+месяц\s+будут|подготовить|сдать|показать|прислать)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_bad_clean_deadline(value: str | None, source_text: str | None) -> bool:
+    key = _deadline_key(value)
+    plain_key = re.sub(r"^(?:в|во|к|ко|на)\s+", "", key)
+    source = (source_text or "").lower().replace("ё", "е")
+    if key in {"срок", "дедлайн", "кратчайший срок", "16 го видно", "16-го видно"}:
+        return True
+    if HISTORICAL_DATE_CONTEXT_RE.search(source) and not FUTURE_DEADLINE_CONTEXT_RE.search(source):
+        return True
+    if plain_key == "четверг" and not re.search(r"встреч|созвон|поставим|назнач|удобн|соглас|подготов|отправ|сдать|присл|показ", source):
+        return True
+    if key in {"4.30", "4:30", "5.30", "5:30"} and not re.search(r"встреч|созвон|вечер|удобн", source):
+        return True
+    return False
+
+
+def _refine_deadline_kind(kind: str, text: str | None, value: str | None, result: dict) -> str:
+    if not _is_commercial_result(result) and not _is_oil_gas_result(result):
+        return kind
+    haystack = f"{text or ''} {value or ''}".lower().replace("ё", "е")
+    if re.search(r"сегодня[- ]завтра", haystack) and re.search(r"документ|term sheet|термшит|прислат|отправ|направ", haystack):
+        return "commitment_deadline"
+    if re.search(r"(?:минимум\s+)?за\s+(?:5|пять)\s+рабоч\w*\s+дн\w*\s+до\s+отгруз", haystack):
+        return "contract_logistics_deadline"
+    if re.search(r"в\s+течение\s+24\s+час", haystack) and re.search(r"судн|приемлем|приемлемост|подтверд", haystack):
+        return "operational_deadline"
+    return kind
+
+
+SUPPLEMENTAL_DEADLINE_PATTERNS = (
+    r"\bзавтра\b",
+    r"\bв\s+(?:пятницу|понедельник|среду|четверг)\b",
+    r"\bво\s+вторник\b",
+    r"\bк\s+выходным\b",
+    r"\bв\s+следующий\s+раз\b",
+    r"\bчерез\s+месяц\b",
+)
+
+
+def _deadline_candidates_from_result(result: dict) -> list[dict]:
+    candidates: list[dict] = []
+    existing_sources = {
+        (item.get("source_fragment"), re.sub(r"\s+", " ", item.get("text") or "").strip())
+        for item in result.get("deadlines", [])
+    }
+    for unit in _result_text_units(result):
+        text = unit["text"]
+        source_fragment = unit.get("source_fragment")
+        if (source_fragment, re.sub(r"\s+", " ", text).strip()) in existing_sources:
+            continue
+        values = find_deadlines(text)
+        for pattern in SUPPLEMENTAL_DEADLINE_PATTERNS:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                value = match.group(0).strip(" .,:;")
+                if value and value not in values:
+                    values.append(value)
+        if not values:
+            continue
+        candidates.append(
+            {
+                "text": text,
+                "deadlines": values,
+                "deadline_normalized": None,
+                "kind": classify_deadline_kind(text),
+                "source_fragment": source_fragment,
+            }
+        )
+    return candidates
+
+
 def _extract_question_title(question: str) -> str:
     clean = re.sub(r"\s+", " ", question or "").strip()
     if "?" in clean:
-        first_question = clean[: clean.find("?") + 1]
-        start = max(first_question.rfind(". "), first_question.rfind("! "), first_question.rfind("? "))
-        selected = first_question[start + 2 :].strip(" .,:;") if start >= 0 else first_question.strip(" .,:;")
+        question_part = clean[: clean.rfind("?") + 1]
+        late_short_question = re.search(
+            r"\b(насколько\s+[^?.!]{1,80}\?|кто\s+[^?.!]{1,80}\?|какой\s+потолок\?|до\s+какой\s+даты\?)\s*$",
+            question_part,
+            re.IGNORECASE,
+        )
+        if late_short_question and late_short_question.start() > 24:
+            selected = late_short_question.group(1).strip(" .,:;")
+        else:
+            first_question = clean[: clean.find("?") + 1]
+            start = max(first_question.rfind(". "), first_question.rfind("! "), first_question.rfind("? "))
+            selected = first_question[start + 2 :].strip(" .,:;") if start >= 0 else first_question.strip(" .,:;")
         return _trim_text(selected, 180) or selected
     return _trim_text(clean, 180) or clean
 
@@ -502,6 +1800,139 @@ PREMIUM_BREAKDOWN_ANSWER = (
     "Около 90 центов относится к фрахту, 30–40 центов — к страховке и портовым расходам, "
     "остальное — к риску задержек и доступности логистики."
 )
+
+BAD_QA_FRAGMENT_PATTERNS = (
+    "что-то сделать, поэтому это вам",
+    "когда я тестировал и просто проверял",
+    "что обсудили, не придумали никаких решений",
+    "что я раздаю экран",
+    "где в котором есть таймер",
+    "что короче не получилось связать",
+    "что вроде как правда",
+    "что у нас есть какие-то необходимые критерии",
+    "что-то там минимизировать",
+    "где-то можно это просто перед этим",
+    "что это решение ожидается",
+    "где-то в пакете как нам сказали",
+    "что администратор целой",
+    "между человеком",
+    "кто-то им отвечает так что я",
+    "что как бы написать математическую постановку",
+    "что можно дать какие-нибудь простенькие задачи",
+    "какие-нибудь простенькие задачи",
+    "что значит вот минимизировать",
+    "что у нас кратчайший срок",
+    "что надо будет еще раз",
+    "что вроде как это можно",
+    "что это вам видимо надо будет",
+    "что то сделать поэтому это вам",
+    "какой-нибудь разметку может быть",
+    "какие-то учебные вещи",
+    "когда я это делал, потому что",
+    "что думаете в целом понятно вам как из этого всего дела тут вообще что происходит",
+    "какие-то особые дефолтные так получается",
+    "что там используют какие-то локальные файлы",
+    "что просто вот такая штука есть",
+    "какие-то конкретные объекты",
+)
+
+GOOD_QA_TITLE_MARKERS = (
+    "что означает минимальность",
+    "корректно ли сформулирована",
+    "какие метрики использовать",
+    "что указать в критериях качества",
+    "можно ли использовать аппаратное ускорение",
+    "какая ос и программная среда",
+    "требуется ли договор",
+    "что делать сейчас с практикой",
+    "кто подписывает документы",
+    "как лучше начать введение",
+    "какие источники использовать",
+    "по архитектуре оно централизировано",
+    "где хранятся метрики",
+    "какая база данных используется",
+    "база данных локальная",
+    "можно ли обосновать актуальность",
+    "что там получилось",
+    "как связать критерии оптимизации",
+    "почему полносвязанная топология",
+    "есть ли модель блокировок",
+    "можно ли использовать минимальное остовное дерево",
+    "какие веса каналов учитывать",
+    "как учитывать расписания",
+    "достаточно ли mvp",
+    "когда удобнее встречаться",
+    "как лучше оформить архитектурную диаграмму",
+    "как подписать systemd timer",
+    "что поручить второкурсникам",
+    "какие ограничения добавить в модель",
+    "как сформулировать математическую постановку",
+    "есть ли смешанная метрика",
+    "какие метрики лучше использовать",
+    "как оценивать качество модели топологии",
+    "нужно ли добавить сбор данных и телеметрию",
+    "можно ли прислать диаграмму отдельным",
+    "нужно ли прийти во вторник",
+    "понятна ли архитектурная диаграмма",
+    "как корректно описать взаимодействие через каталог",
+    "нужно ли указывать локальные файлы",
+    "нужно ли делать отдельные уровни c4",
+    "нужно ли пояснять каждую стрелку",
+    "стоит ли добавить sequence diagram",
+    "стоит ли подробнее расписывать ограничения",
+    "правда ли что завтра дедлайн",
+    "что вообще у вас есть",
+    "где находятся камеры",
+    "можно ли смотреть температуру npu",
+    "можно ли смотреть частоту",
+)
+
+HARDWARE_QA_CANONICAL_RULES = (
+    (r"задач\w+\s+перед\s+разработчик|задач\w+\s+котор\w+\s+реша\w+\s+по", "В ней описывается задача перед разработчиками или задача, которую решает ПО?"),
+    (r"ограничен\w+.*формальн\w+\s+постановк|формальн\w+\s+постановк.*ограничен", "Стоит ли подробнее расписывать ограничения в формальной постановке?"),
+    (r"завтра.*дедлайн|дедлайн.*завтра|дедлайн.*черновик", "Правда ли, что завтра дедлайн у черновика?"),
+    (r"что\s+вообще\s+у\s+вас\s+есть|что\s+у\s+вас\s+там\s+есть", "Что вообще у вас есть?"),
+    (r"простеньк\w+\s+задач|учебн\w+\s+вещ|opencv|второкурсник", "Что можно поручить второкурсникам?"),
+    (r"где.*камер|камер.*где|камер.*короб|камер.*пакет", "Где находятся камеры?"),
+    (r"температур.*npu|npu.*температур", "Можно ли смотреть температуру NPU?"),
+    (r"частот.*benchmark|benchmark.*частот", "Можно ли смотреть частоту во время benchmark?"),
+    (r"qemu|симуляц\w+\s+raspberry", "Можно ли использовать QEMU для симуляции Raspberry Pi?"),
+)
+
+ARCHITECTURE_QA_CANONICAL_RULES = (
+    (r"png|pdf|svg|отдельн\w+\s+файл", "Можно ли прислать диаграмму отдельным PNG/PDF/SVG-файлом?"),
+    (r"во\s+вторник|вторник.*прийти|прийти.*вторник", "Нужно ли прийти во вторник?"),
+    (r"понятн\w+.*диаграм|диаграм\w+.*понятн|в\s+целом\s+понятн", "Понятна ли архитектурная диаграмма?"),
+    (r"взаимодейств\w+.*каталог|каталог.*взаимодейств", "Как корректно описать взаимодействие через каталог?"),
+    (r"локальн\w+\s+файл|файл\w+.*архитектур", "Нужно ли указывать локальные файлы в описании архитектуры?"),
+    (r"уровн\w+\s+c4|c4.*уровн", "Нужно ли делать отдельные уровни C4?"),
+    (r"стрелк", "Нужно ли пояснять каждую стрелку?"),
+    (r"sequence\s+diagram|sequence", "Стоит ли добавить sequence diagram?"),
+    (r"компонент.*взаимодейств|взаимодейств.*компонент", "Как описать компоненты и взаимодействия?"),
+)
+
+GRAPH_VKR_QA_CANONICAL_RULES = (
+    (
+        r"ухудшается\s+но\s+не\s+так\s+резко|смешан\w+\s+метрик",
+        "Есть ли смешанная метрика для оценки графа?",
+    ),
+    (
+        r"плох\w+\s+тем\s+что\s+он\s+учитывает|наихудш\w+\s+случа|диаметр.*средн\w+\s+дистанц|средн\w+\s+дистанц.*диаметр",
+        "Какие метрики лучше использовать: диаметр или среднюю дистанцию?",
+    ),
+    (
+        r"что\s+нам\s+интересно\s+от\s+этой\s+модел|качество\s+модел\w+\s+тополог",
+        "Как оценивать качество модели топологии?",
+    ),
+    (
+        r"какие-то\s+инструмент\w+\s+для|сбор\w*\s+данн\w+|телеметр",
+        "Нужно ли добавить сбор данных и телеметрию?",
+    ),
+    (
+        r"критери\w+\s+качеств|необходим\w+\s+критери",
+        "Что указать в критериях качества?",
+    ),
+)
 TECHNICAL_DEFINITION_RE = re.compile(
     r"\b(это\s+(?:дебит|параметр|значение|модель|формула|расч[её]т)|"
     r"метро(?:кубический|куб\w*)\s+разделить\s+на\s+сутки|"
@@ -511,7 +1942,9 @@ TECHNICAL_DEFINITION_RE = re.compile(
 )
 TECHNICAL_CONTEXT_RE = re.compile(
     r"\b(как\s+правило|в\s+теории|в\s+принципе|получается|может\s+быть|могут\s+быть|"
-    r"могут\s+присутствовать|могут\s+.*корректировк\w+\s+внести|могут\s+корректировк\w+\s+внести)\b",
+    r"могут\s+присутствовать|могут\s+.*корректировк\w+\s+внести|могут\s+корректировк\w+\s+внести|"
+    r"можно\s+будет|далеко\s+не\s+бесполезно|как\s+раз[-\s]?таки|"
+    r"(?:для\s+)?того,\s*чтобы\s+проверить|(?:для\s+)?того\s+чтобы\s+проверить)\b",
     re.IGNORECASE,
 )
 TECHNICAL_GENERIC_RE = re.compile(
@@ -519,7 +1952,8 @@ TECHNICAL_GENERIC_RE = re.compile(
     re.IGNORECASE,
 )
 TECHNICAL_SPEAKER_INTENT_RE = re.compile(
-    r"\b(я\s+попробую\s+(?:тогда\s+)?(?:у\s+себя\s+)?поискать|может\s+поискать|я\s+думаю\s+поискать|посмотрю\s+у\s+себя)\b",
+    r"\b(я\s+попробую\s+(?:тогда\s+)?(?:у\s+себя\s+)?поискать|(?:у\s+)?себя\s+поискать\s+кейс\w*|"
+    r"может\s+поискать|я\s+думаю\s+поискать|посмотрю\s+у\s+себя)\b",
     re.IGNORECASE,
 )
 TECHNICAL_RECOMMENDATION_RE = re.compile(
@@ -531,7 +1965,7 @@ RESEARCH_ACTION_OBJECT_RE = re.compile(
     r"\b(устойчивост\w+\s+модел\w+|точност\w+|разв[её]ртк\w+|групп\w+\s+параметр\w+|"
     r"s,\s*n,\s*a,\s*l|s\s+n\s+a\s+l|частн\w+\s+случа\w+|кейс\w+|реализац\w+|"
     r"расч[её]т\w+|вычислительн\w+\s+эксперимент|вкр|раздел|следующ\w+\s+встреч\w+|"
-    r"четверг|7[:.]30|промежуточн\w+\s+результат\w+|скин-?фактор)\b",
+    r"четверг|7[:.]30|промежуточн\w+\s+результат\w+|скин-?фактор|systemd|timer|kerberos|каталог)\b",
     re.IGNORECASE,
 )
 RESEARCH_ACTION_VERB_RE = re.compile(
@@ -548,8 +1982,33 @@ def _is_premium_breakdown_qa(question: str | None, answer: str | None) -> bool:
     return has_premium and has_breakdown
 
 
+def _canonical_graph_vkr_question(question: str | None, answer: str | None, result: dict) -> str | None:
+    domains = detect_meeting_domains(result)
+    combined = re.sub(r"\s+", " ", f"{question or ''} {answer or ''}").lower().replace("ё", "е")
+    if "technical_hardware" in domains:
+        for pattern, title in HARDWARE_QA_CANONICAL_RULES:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return title
+    if "architecture_c4" in domains:
+        for pattern, title in ARCHITECTURE_QA_CANONICAL_RULES:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return title
+    if "graph_vkr" in domains:
+        if re.search(r"критери\w+\s+качеств|необходим\w+\s+критери", combined, re.IGNORECASE):
+            return "Что указать в критериях качества?"
+        for pattern, title in GRAPH_VKR_QA_CANONICAL_RULES:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return title
+    return None
+
+
 def _is_low_quality_question(question: str, answer: str | None = None) -> bool:
     title = (_extract_question_title(question) or "").lower().strip(" ?!.")
+    combined = re.sub(r"\s+", " ", f"{question or ''} {answer or ''}".lower())
+    if any(pattern in combined for pattern in BAD_QA_FRAGMENT_PATTERNS):
+        return True
+    if any(marker in title for marker in GOOD_QA_TITLE_MARKERS):
+        return False
     if not title:
         return True
     if title.startswith("давайте") or re.match(r"^\d", title):
@@ -624,6 +2083,8 @@ def _normalize_task_title(text: str) -> str | None:
         return "Проверить разделение исследования по группам параметров S, N, A, L"
     if "промежуточные результаты" in compact and ("скин" in compact or "скидыв" in compact):
         return "Скинуть промежуточные результаты"
+    if "systemd" in compact and "timer" in compact:
+        return "Описать запуск сервиса через systemd timer каждые 15 минут"
     if "сопостав" in compact and ("кейс" in compact or "реализац" in compact or "расчет" in compact or "расчёт" in compact):
         return "Сопоставить кейсы/реализации расчетов"
     if "встреч" in compact and ("четверг" in compact or "7.30" in compact or "7:30" in compact):
@@ -652,6 +2113,28 @@ def _normalize_task_title(text: str) -> str | None:
     return _sentence_case(text)
 
 
+BAD_CLEAN_TASK_SUBSTRINGS = (
+    "которую мы писали скинь пожалуйста",
+    "вот стандартные обработка изображений",
+    "сделать. я думаю",
+    "мощь в это или нет сделать",
+)
+
+BAD_CLEAN_TASK_TITLES = {
+    "Согласовать следующую встречу на четверг 19:30",
+    "Сопоставить кейсы/реализации расчетов",
+    "Описать вариант в ВКР",
+}
+
+
+def _is_bad_clean_task(title: str | None, source_text: str | None) -> bool:
+    title_clean = (title or "").strip()
+    source = re.sub(r"\s+", " ", (source_text or "").lower())
+    if title_clean in BAD_CLEAN_TASK_TITLES:
+        return True
+    return any(pattern in source for pattern in BAD_CLEAN_TASK_SUBSTRINGS)
+
+
 def _research_action_title(text: str) -> str | None:
     compact = re.sub(r"\s+", " ", (text or "").lower()).strip(" .,:;")
     if not compact:
@@ -662,10 +2145,12 @@ def _research_action_title(text: str) -> str | None:
         (("развертк",), "Сделать развертку по параметрам/формуле безразмеривания"),
         (("развёртк",), "Сделать развертку по параметрам/формуле безразмеривания"),
         (("групп", "параметр"), "Разделить исследование по группам параметров S, N, A, L"),
+        (("групп", "s", "n", "a", "l"), "Разделить исследование по группам параметров S, N, A, L"),
         (("s", "n", "a", "l", "параметр"), "Разделить исследование по группам параметров S, N, A, L"),
         (("сопостав", "кейс"), "Сопоставить кейсы/реализации расчетов"),
         (("сопостав", "реализац"), "Сопоставить кейсы/реализации расчетов"),
         (("вычислительн", "эксперимент"), "Подготовить описание вычислительного эксперимента"),
+        (("systemd", "timer"), "Описать запуск сервиса через systemd timer каждые 15 минут"),
         (("оформ", "вкр"), "Оформить раздел ВКР"),
         (("опис", "вкр"), "Описать вариант в ВКР"),
         (("следующ", "встреч"), "Согласовать следующую встречу на четверг 19:30"),
@@ -727,6 +2212,83 @@ def _is_research_action(text: str) -> bool:
     return bool(RESEARCH_ACTION_VERB_RE.search(text) and RESEARCH_ACTION_OBJECT_RE.search(text))
 
 
+def _result_text_units(result: dict) -> list[dict]:
+    units = result.get("semantic_blocks") or result.get("transcript") or []
+    normalized: list[dict] = []
+    for index, unit in enumerate(units, start=1):
+        if not isinstance(unit, dict):
+            continue
+        text = str(unit.get("text") or "").strip()
+        if not text:
+            continue
+        source_fragment = unit.get("source_fragment") or unit.get("fragment_index") or unit.get("block_index") or index
+        normalized.append({"text": text, "source_fragment": source_fragment})
+    return normalized
+
+
+def _unit_supports_groups(text: str, marker_groups: tuple[tuple[str, ...], ...]) -> bool:
+    lower = text.lower().replace("ё", "е")
+    return all(any(marker in lower for marker in group) for group in marker_groups)
+
+
+SYNTHETIC_RESEARCH_ACTION_RULES: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = (
+    ("Прийти с термопастой в следующий раз", (("термопаст",), ("следующ", "раз"))),
+    ("Запустить YOLO benchmark на Raspberry Pi", (("yolo",), ("benchmark", "бенчмарк"), ("raspberry",))),
+    ("Проверить температуру и частоту Raspberry Pi во время benchmark", (("температур", "частот"), ("raspberry",), ("benchmark", "бенчмарк"))),
+    ("Привести датасеты к общему формату", (("датасет", "dataset"), ("формат",))),
+    ("Проверить наличие камер в коробках/пакетах", (("камер",), ("коробк", "пакет"))),
+    ("Найти инструкции по AI Kit / Hailo", (("ai kit", "hailo"), ("инструкц", "найти", "посмотр"))),
+    ("Уточнить слабомощное железо у второкурсников", (("второкурсник",), ("желез", "слабомощ", "маломощ"))),
+    ("Поручить второкурсникам изучить QEMU / симуляцию Raspberry Pi", (("второкурсник",), ("qemu", "симуляц", "виртуализац"))),
+    ("Отправить формальную постановку задачи завтра", (("формальн", "постановк"), ("задач",), ("завтра", "отправ"))),
+    ("Отправить диаграмму отдельным PNG/PDF/SVG-файлом для проверки", (("диаграм",), ("png", "pdf", "svg", "файл"))),
+    ("Вставить архитектурную диаграмму в ВКР и презентацию", (("архитектур", "диаграм"), ("вкр", "презентац"))),
+    ("Расшифровать сокращение КД при первом использовании", (("кд",), ("расшифр", "сокращ"))),
+    ("Уточнить подпись systemd timer как системный вызов", (("systemd",), ("timer",), ("подпис", "вызов"))),
+    ("Описать взаимодействие сервиса через каталог, а не через клиентское API", (("каталог",), ("клиентск", "api", "взаимодейств"))),
+    ("Проверить термин «инфраструктурный сервис»", (("инфраструктур",), ("сервис",), ("термин", "провер"))),
+    ("Сделать архитектурную диаграмму отдельной страницей/landscape", (("диаграм",), ("страниц", "landscape", "чита"))),
+    ("Описать компоненты и взаимодействия по C4-диаграмме", (("c4", "диаграм"), ("компонент", "взаимодейств"))),
+    ("Продолжить главу с постановкой задачи", (("продолж",), ("глав",), ("постановк", "задач"))),
+    ("Переформулировать критерий оптимальности топологии", (("переформулир", "сформулир"), ("критер", "оптимальн", "оптимизац"))),
+    ("Описать ограничение по количеству связей", (("огранич",), ("количеств",), ("связ",))),
+    ("Обосновать выбор топологии графа", (("обоснов",), ("тополог", "граф"))),
+    ("Описать метрики графа", (("метрик",), ("граф",))),
+    ("Описать сбор данных и телеметрию", (("телеметр", "сбор данн"),)),
+    ("Описать исключения и ограничения модели", (("исключен", "ограничен"), ("модел",))),
+    ("Сформулировать критерии качества модели", (("критер",), ("качеств",), ("модел",))),
+    ("Найти похожие ВКР и шаблоны оформления", (("похож", "шаблон"), ("вкр",))),
+)
+
+
+def _synthetic_research_actions(result: dict) -> list[dict]:
+    units = _result_text_units(result)
+    joined = " ".join(unit["text"] for unit in units)
+    actions: list[dict] = []
+    seen: set[str] = set()
+    for title, marker_groups in SYNTHETIC_RESEARCH_ACTION_RULES:
+        source_unit = next((unit for unit in units if _unit_supports_groups(unit["text"], marker_groups)), None)
+        if source_unit is None and _unit_supports_groups(joined, marker_groups):
+            source_unit = {"text": title, "source_fragment": None}
+        if source_unit is None:
+            continue
+        key = _normalize_title_key(title)
+        if key in seen:
+            continue
+        seen.add(key)
+        actions.append(
+            _research_item(
+                source_unit["text"],
+                title,
+                source_unit.get("source_fragment"),
+                confidence=0.72,
+                review_required=False,
+                kind="research_action",
+            )
+        )
+    return actions
+
+
 def build_clean_research_layers(result: dict) -> dict[str, list[dict]]:
     actions: list[dict] = []
     recommendations: list[dict] = []
@@ -784,7 +2346,7 @@ def build_clean_research_layers(result: dict) -> dict[str, list[dict]]:
 
         if _is_research_action(text):
             title = _research_action_title(text)
-            if title and _words_count(title) >= 2:
+            if title and _words_count(title) >= 2 and not _is_bad_clean_task(title, text):
                 add_unique(
                     actions,
                     seen_actions,
@@ -828,17 +2390,19 @@ def build_clean_research_layers(result: dict) -> dict[str, list[dict]]:
         generated_actions.append("Сделать развертку по параметрам/формуле безразмеривания")
     if re.search(r"групп\w+\s+параметр\w+|s,\s*n,\s*a,\s*l|s\s+n\s+a\s+l", joined, re.IGNORECASE):
         generated_actions.append("Разделить исследование по группам параметров S, N, A, L")
-    if re.search(r"сопостав", joined, re.IGNORECASE) and re.search(r"кейс|реализац|расч[её]т", joined, re.IGNORECASE):
-        generated_actions.append("Сопоставить кейсы/реализации расчетов")
-    if re.search(r"встреч|четверг|7[:.]30", joined, re.IGNORECASE):
-        generated_actions.append("Согласовать следующую встречу на четверг 19:30")
-
     for title in generated_actions:
+        if _is_bad_clean_task(title, joined):
+            continue
         add_unique(
             actions,
             seen_actions,
             _research_item(title, title, None, confidence=0.64, review_required=True, kind="research_action"),
         )
+
+    for item in _synthetic_research_actions(result):
+        if _is_bad_clean_task(item.get("title"), item.get("source_text")):
+            continue
+        add_unique(actions, seen_actions, item)
 
     generated_recommendations = []
     if re.search(r"частн\w+\s+верс\w+|частн\w+\s+случа\w+", joined, re.IGNORECASE):
@@ -869,12 +2433,28 @@ def build_clean_tasks(result: dict) -> list[dict]:
     technical = _is_technical_result(result)
     commercial_oil_gas = _is_oil_gas_result(result)
     meeting_label = (result.get("meeting_type") or {}).get("label") if isinstance(result.get("meeting_type"), dict) else None
+    participant_names = _participant_names_from_result(result)
     clean_tasks = []
     seen = set()
 
     for task in result.get("tasks", []):
         source_text = task.get("text", "")
-        if _words_count(source_text) < 3 or REASONING_STOP_RE.search(source_text) or _is_intro_or_agenda(source_text):
+        explicit_research_action = bool(
+            re.search(r"ближайш\w+\s+задач", source_text, re.IGNORECASE)
+            and RESEARCH_ACTION_OBJECT_RE.search(source_text)
+        )
+        if (
+            _words_count(source_text) < 3
+            or (REASONING_STOP_RE.search(source_text) and not explicit_research_action)
+            or _is_intro_or_agenda(source_text)
+        ):
+            continue
+        if technical and (
+            TECHNICAL_DEFINITION_RE.search(source_text)
+            or (TECHNICAL_CONTEXT_RE.search(source_text) and not explicit_research_action)
+            or TECHNICAL_GENERIC_RE.search(source_text)
+            or TECHNICAL_SPEAKER_INTENT_RE.search(source_text)
+        ):
             continue
         if commercial_oil_gas:
             if _is_commercial_commitment(source_text) or not _is_commercial_action_task(source_text):
@@ -885,11 +2465,16 @@ def build_clean_tasks(result: dict) -> list[dict]:
         if not title or _words_count(title) < 2:
             continue
         title = _trim_text(title, 160) or title
+        if _is_bad_clean_task(title, source_text):
+            continue
         key = title.lower()
         if key in seen:
             continue
 
         responsible = task.get("responsible")
+        if not responsible:
+            matched_responsibles = find_responsibles(source_text, participants=participant_names)
+            responsible = matched_responsibles[0] if matched_responsibles else None
         responsible_side = task.get("responsible_side") or find_responsible_side(source_text)
         deadline = task.get("deadline")
         decision = score_task_candidate(source_text, meeting_label, responsible=responsible, deadline=deadline)
@@ -922,39 +2507,6 @@ def build_clean_tasks(result: dict) -> list[dict]:
                 "decision": decision,
             }
         )
-
-    if technical:
-        joined = _joined_text(result)
-        generated = []
-        if re.search(r"сопостав", joined, re.IGNORECASE):
-            generated.append(("Сопоставить кейсы/реализации расчетов", None, None))
-        if re.search(r"встреч|четверг|7[:.]30", joined, re.IGNORECASE):
-            generated.append(("Согласовать следующую встречу на четверг 19:30", None, "четверг 19:30"))
-        if re.search(r"промежуточные\s+результаты", joined, re.IGNORECASE):
-            generated.append(("Скинуть промежуточные результаты", None, None))
-        for title, source_fragment, deadline in generated:
-            if title.lower() not in seen:
-                seen.add(title.lower())
-                clean_tasks.append(
-                    {
-                        "title": title,
-                        "summary": _clean_summary(title),
-                        "source_text": title,
-                        "responsible": None,
-                        "responsible_side": None,
-                        "deadline": deadline,
-                        "confidence": 0.62,
-                        "review_required": True,
-                        "source_fragment": source_fragment,
-                        "decision": {
-                            "candidate_type": "task",
-                            "score": 0.62,
-                            "decision": "review",
-                            "review_required": True,
-                            "reasons": ["technical_summary_action_item"],
-                        },
-                    }
-                )
 
     return clean_tasks
 
@@ -992,6 +2544,7 @@ def build_clean_questions_answers(result: dict) -> list[dict]:
     units = result.get("semantic_blocks") or result.get("transcript", [])
     clean_pairs = []
     seen_questions = set()
+    seen_question_titles = set()
     premium_breakdown_added = False
 
     for pair in result.get("questions_answers", []):
@@ -1013,8 +2566,9 @@ def build_clean_questions_answers(result: dict) -> list[dict]:
         elif pair.get("answer_fragment"):
             source_fragments.append(pair.get("answer_fragment"))
 
+        canonical_question = _canonical_graph_vkr_question(question, answer, result)
         is_premium_breakdown = _is_premium_breakdown_qa(question, answer)
-        if not is_premium_breakdown and _is_low_quality_question(question, answer):
+        if not is_premium_breakdown and not canonical_question and _is_low_quality_question(question, answer):
             continue
 
         if is_premium_breakdown:
@@ -1026,11 +2580,20 @@ def build_clean_questions_answers(result: dict) -> list[dict]:
             status = "answered"
             review_required = False
             confidence = 0.86
+        elif canonical_question:
+            question_title = canonical_question
+            answer_summary = _summarize_answer(answer)
+            review_required = status != "answered"
+            confidence = 0.78 if status == "answered" else 0.58 if status == "partial" else 0.42
         else:
             question_title = _extract_question_title(question)
             answer_summary = _summarize_answer(answer)
             review_required = status != "answered"
             confidence = 0.82 if status == "answered" else 0.58 if status == "partial" else 0.35
+        title_key = _normalize_title_key(question_title)
+        if title_key in seen_question_titles:
+            continue
+        seen_question_titles.add(title_key)
         clean_pairs.append(
             {
                 "question": question,
@@ -1050,16 +2613,27 @@ def build_clean_questions_answers(result: dict) -> list[dict]:
 
 def build_clean_deadlines(result: dict) -> list[dict]:
     clean_deadlines = []
-    label_map = {"task_deadline": 0.82, "answer_deadline": 0.72, "meeting_time": 0.78, "mention": 0.68}
-    for item in result.get("deadlines", []):
+    label_map = {
+        "task_deadline": 0.82,
+        "answer_deadline": 0.72,
+        "meeting_time": 0.78,
+        "mention": 0.68,
+        "commitment_deadline": 0.82,
+        "contract_logistics_deadline": 0.86,
+        "operational_deadline": 0.84,
+    }
+
+    def add_deadline_item(item: dict) -> None:
         for value in item.get("deadlines", []):
             value = _canonical_deadline_value(value, item.get("text"))
             key = _deadline_key(value)
             if not key:
                 continue
+            if _is_bad_clean_deadline(value, item.get("text")):
+                continue
             if FREQUENCY_ONLY_RE.search(value or ""):
                 continue
-            kind = item.get("kind") or "mention"
+            kind = _refine_deadline_kind(item.get("kind") or "mention", item.get("text"), value, result)
             confidence = label_map.get(kind, 0.68)
             context = _deadline_context(item.get("text"), value)
             clean_item = {
@@ -1081,6 +2655,11 @@ def build_clean_deadlines(result: dict) -> list[dict]:
                 clean_deadlines.append(clean_item)
             elif _deadline_specificity(value) > _deadline_specificity(clean_deadlines[existing_index].get("deadline")):
                 clean_deadlines[existing_index] = clean_item
+
+    for item in result.get("deadlines", []):
+        add_deadline_item(item)
+    for item in _deadline_candidates_from_result(result):
+        add_deadline_item(item)
     return clean_deadlines
 
 
@@ -1619,13 +3198,299 @@ def _main_topics(result: dict) -> list[str]:
         topics = _oil_gas_main_topics(result)
         if topics:
             return topics
-    names = [item.get("topic_name") for item in result.get("topics", []) if item.get("topic_name")]
-    if names:
-        return names[:6]
-    counts: Counter[str] = Counter()
+    clean_names = [item.get("topic_name") or item.get("title") for item in result.get("clean_topics", []) if item.get("topic_name") or item.get("title")]
+    if clean_names:
+        return clean_names[:6]
+    return []
+
+
+def _display_topic_priority(name: str | None, domains: set[str]) -> int:
+    key = _normalize_title_key(name)
+    if "technical_hardware" in domains:
+        priorities = {
+            "raspberry pi 5 и orange pi": 0,
+            "raspberry pi и настройка окружения": 0,
+            "yolo benchmark": 1,
+            "модель детекции рук": 1,
+            "камеры и fps": 2,
+            "датасеты и разметка": 2,
+            "qemu виртуализация raspberry pi": 3,
+            "ai kit hailo accelerator": 3,
+            "перегрев и охлаждение raspberry pi": 4,
+            "usb bandwidth и подключение камер": 4,
+            "входные данные ml pipeline": 8,
+            "формальная постановка задачи": 8,
+            "постановка задачи": 10,
+            "график работы с оборудованием": 14,
+        }
+        return priorities.get(key, 6)
+    if "architecture_c4" in domains and "graph_vkr" not in domains:
+        priorities = {
+            "архитектурная диаграмма c4": 0,
+            "описание архитектуры в вкр": 1,
+            "systemd timer": 2,
+            "инфраструктурный сервис": 2,
+            "ldap каталог домена": 3,
+            "каталог домена": 3,
+            "компоненты и взаимодействия": 4,
+            "внешние системы и пользователи": 4,
+            "клиент серверная архитектура": 5,
+            "модульный монолит": 5,
+            "локальные артефакты сервиса": 6,
+            "sequence diagram": 6,
+            "взаимодействие через каталог": 6,
+            "вкр и презентация": 10,
+            "документ вкр и отчет": 10,
+            "требования к вкр": 12,
+            "график презентации встречи": 14,
+        }
+        return priorities.get(key, 7)
+    if "graph_vkr" in domains:
+        priorities = {
+            "постановка задачи": 0,
+            "математическая модель": 1,
+            "аппроксимация метрик графа": 1,
+            "метрики графа": 2,
+            "диаметр и топология графа": 2,
+            "критерии качества": 2,
+            "критерии оптимизации": 2,
+            "модель топологии сети": 3,
+            "количество связей": 3,
+            "ограничения модели": 4,
+            "сбор данных и телеметрия": 4,
+            "входные данные математической модели": 8,
+            "требования к вкр": 12,
+        }
+        return priorities.get(key, 6)
+    return 0
+
+
+def build_clean_topics(result: dict) -> list[dict]:
+    topics = []
+    seen: dict[str, dict] = {}
+    transcript_segments = result.get("transcript") if isinstance(result.get("transcript"), list) else []
+    domains = detect_meeting_domains(result)
+    for index, topic in enumerate(result.get("topics", []), start=1):
+        raw_name = str(topic.get("topic_name") or topic.get("title") or "").strip()
+        keywords = _normalize_display_keywords(topic.get("keywords"), 8)
+        source_text = topic.get("source_text") or " ".join(str(fragment) for fragment in topic.get("texts", []) or [])
+        evidence = build_topic_evidence(topic, transcript_segments, result) or source_text
+        cleaned = semantic_clean_topic_or_aspect(
+            {
+                **topic,
+                "topic_name": raw_name,
+                "keywords": keywords,
+                "source_text": source_text,
+            },
+            evidence,
+            domains,
+            result,
+        )
+        if not cleaned and keywords and (
+            _normalize_title_key(raw_name) not in BAD_DISPLAY_TOPIC_KEYS
+            or _normalize_title_key(raw_name) in DISPLAY_TOPIC_EXACT_MAP
+        ):
+            cleaned = semantic_clean_topic_or_aspect(
+                {
+                    **topic,
+                    "topic_name": " ".join(keywords[:3]),
+                    "keywords": keywords,
+                    "source_text": source_text,
+                },
+                evidence,
+                domains,
+                result,
+            )
+        if not cleaned:
+            continue
+        name = cleaned["title"]
+        keywords = cleaned["keywords"]
+        key = _normalize_title_key(name)
+        fragment_ids = topic.get("fragment_ids") or topic.get("fragments") or []
+        if key not in seen:
+            seen[key] = {
+                "id": f"topic_{len(seen) + 1}",
+                "type": "topic",
+                "title": name,
+                "summary": ", ".join(keywords[:5]) if keywords else name,
+                "topic_name": name,
+                "keywords": keywords[:8],
+                "count": int(topic.get("count") or len(fragment_ids) or 1),
+                "fragment_ids": list(fragment_ids),
+                "source_fragment": fragment_ids[0] if fragment_ids else topic.get("source_fragment"),
+                "confidence": float(topic.get("confidence", 0.55) or 0.55),
+                "needs_review": float(topic.get("confidence", 0.55) or 0.55) < 0.45,
+                "source_text": topic.get("source_text") or name,
+                "semantic_similarity": cleaned.get("semantic_similarity", 0.0),
+            }
+        else:
+            entry = seen[key]
+            entry["count"] += int(topic.get("count") or len(fragment_ids) or 1)
+            entry["fragment_ids"] = sorted(set(entry.get("fragment_ids", []) + list(fragment_ids)))
+            entry["keywords"] = list(dict.fromkeys(entry.get("keywords", []) + keywords))[:8]
+            entry["summary"] = ", ".join(entry["keywords"][:5]) if entry.get("keywords") else entry["title"]
+    return sorted(
+        seen.values(),
+        key=lambda item: (_display_topic_priority(item.get("title") or item.get("topic_name"), domains), -int(item.get("count", 0) or 0)),
+    )
+
+
+def _clean_topic_or_aspect_name(
+    name: str | None,
+    keywords: list[str] | None = None,
+    source_text: str | None = None,
+    result: dict | None = None,
+) -> str | None:
+    return _final_display_topic_name(name, keywords, source_text, result or {})
+
+
+def build_clean_aspects(result: dict) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    metrics = result.get("metrics") or {}
+    transcript_segments = result.get("transcript") if isinstance(result.get("transcript"), list) else []
+    domains = detect_meeting_domains(result)
+
+    def add_aspect(name: str | None, count: int = 1, *, keywords: list[str] | None = None, fragment_ids: list | None = None, source_text: str | None = None) -> None:
+        raw_item = {
+            "title": name,
+            "keywords": _normalize_display_keywords(keywords, 8),
+            "fragment_ids": fragment_ids or [],
+            "source_text": source_text or "",
+        }
+        evidence = build_topic_evidence(raw_item, transcript_segments, result)
+        cleaned = semantic_clean_topic_or_aspect(raw_item, evidence, domains, result)
+        if not cleaned:
+            return
+        clean_name = cleaned["title"]
+        clean_keywords = cleaned["keywords"]
+        key = _normalize_title_key(clean_name)
+        if key not in grouped:
+            grouped[key] = {
+                "name": clean_name,
+                "count": 0,
+                "keywords": [],
+                "fragment_ids": [],
+            }
+        grouped[key]["count"] += int(count or 1)
+        grouped[key]["keywords"] = list(dict.fromkeys(grouped[key]["keywords"] + clean_keywords))[:8]
+        grouped[key]["fragment_ids"] = sorted(set(grouped[key]["fragment_ids"] + list(fragment_ids or [])))
+
+    for source in (result.get("aspect_frequencies") or {}, metrics.get("aspect_frequencies") or {}):
+        for name, count in source.items():
+            add_aspect(str(name), int(count or 1))
     for item in result.get("aspects", []):
-        counts.update(item.get("aspects", []))
-    return [name for name, _ in counts.most_common(6)]
+        for aspect in item.get("aspects") or []:
+            source_fragment = item.get("source_fragment") or item.get("fragment_index")
+            add_aspect(str(aspect), 1, fragment_ids=[source_fragment] if source_fragment else [], source_text=item.get("text"))
+    for topic in result.get("clean_topics", []):
+        if topic.get("topic_name"):
+            add_aspect(
+                str(topic["topic_name"]),
+                int(topic.get("count") or 1),
+                keywords=list(topic.get("keywords") or []),
+                fragment_ids=list(topic.get("fragment_ids") or []),
+                source_text=topic.get("source_text"),
+            )
+    clean_aspects = []
+    for index, item in enumerate(
+        sorted(grouped.values(), key=lambda value: (_display_topic_priority(value["name"], domains), -int(value["count"] or 0)))[:20],
+        start=1,
+    ):
+        count = item["count"]
+        clean_aspects.append(
+            {
+                "id": f"aspect_{index}",
+                "type": "aspect",
+                "title": item["name"],
+                "summary": f"Упоминаний: {count}",
+                "count": count,
+                "keywords": item["keywords"],
+                "fragment_ids": item["fragment_ids"],
+                "source_text": item["name"],
+                "confidence": 0.6,
+                "needs_review": False,
+            }
+        )
+    return clean_aspects
+
+
+def build_clean_sentiment(result: dict) -> list[dict]:
+    clean = []
+    for index, item in enumerate(result.get("sentiment", []), start=1):
+        label = item.get("sentiment") or item.get("label") or "neutral"
+        text = item.get("text") or item.get("source_text") or ""
+        clean.append(
+            {
+                "id": f"sentiment_{index}",
+                "type": "sentiment",
+                "title": _trim_text(text, 120) or label,
+                "summary": label,
+                "source_text": text,
+                "source_fragment": item.get("source_fragment") or index,
+                "timestamp_start": item.get("start"),
+                "timestamp_end": item.get("end"),
+                "sentiment": label,
+                "score": item.get("score", 0.0),
+                "confidence": abs(float(item.get("score", 0.0) or 0.0)),
+                "needs_review": False,
+            }
+        )
+    return clean
+
+
+def build_sentiment_summary(result: dict) -> dict:
+    items = result.get("clean_sentiment") or build_clean_sentiment(result)
+    values = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
+    counts = Counter(item.get("sentiment", "neutral") for item in items)
+    scores = [values.get(item.get("sentiment", "neutral"), 0.0) for item in items]
+    return {
+        "positive_count": int(counts.get("positive", 0)),
+        "neutral_count": int(counts.get("neutral", 0)),
+        "negative_count": int(counts.get("negative", 0)),
+        "average_sentiment": round(sum(scores) / len(scores), 3) if scores else 0.0,
+    }
+
+
+def build_aspect_sentiment(result: dict) -> dict[str, dict]:
+    sentiment_by_fragment = {
+        int(item.get("source_fragment") or index): item.get("sentiment", "neutral")
+        for index, item in enumerate(result.get("clean_sentiment") or [], start=1)
+    }
+    values = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
+    grouped: dict[str, list[float]] = {}
+    for aspect_item in result.get("clean_aspects") or []:
+        name = aspect_item.get("title") or aspect_item.get("name")
+        if not name:
+            continue
+        fragments = aspect_item.get("fragment_ids") or []
+        if not fragments:
+            grouped.setdefault(str(name), []).append(0.0)
+            continue
+        for fragment in fragments:
+            try:
+                fragment_id = int(fragment)
+            except (TypeError, ValueError):
+                continue
+            score = values.get(sentiment_by_fragment.get(fragment_id, "neutral"), 0.0)
+            grouped.setdefault(str(name), []).append(score)
+    return {
+        aspect: {"average_sentiment": round(sum(scores) / len(scores), 3), "mentions": len(scores)}
+        for aspect, scores in grouped.items()
+        if scores
+    }
+
+
+def _summary_sentence(label: str, topics: list[str], clean_tasks: list[dict], clean_qa: list[dict], result: dict) -> str:
+    topic_text = ", ".join(topics[:5]) if topics else "основные вопросы встречи"
+    if label == "non_meeting_speech":
+        return "Запись похожа на монолог или обращение. Задачи, вопросы и сроки выделяются только при явных формулировках."
+    if label in {"technical_research", "education_consultation"}:
+        return f"На встрече обсуждались {topic_text}. В отчете выделены задачи, вопросы, сроки, темы и тональность обсуждения."
+    if label in {"commercial_meeting", "commercial_oil_gas", "oil_gas_commercial", "oil_gas_trading"}:
+        return f"На встрече обсуждались {topic_text}. Коммерческие условия и договоренности отделены от исполнимых задач."
+    if label == "project_meeting":
+        return f"На встрече обсуждались {topic_text}. Выделены задачи, вопросы участников, ответственные и сроки выполнения."
+    return f"На встрече обсуждались {topic_text}. В отчете собраны задачи, вопросы, сроки, аспекты и тональность обсуждения."
 
 
 def build_analysis_summary(result: dict, clean_tasks: list[dict], clean_qa: list[dict]) -> dict:
@@ -1637,35 +3502,22 @@ def build_analysis_summary(result: dict, clean_tasks: list[dict], clean_qa: list
     topics = _main_topics(result)
 
     if _is_oil_gas_result(result):
-        key_findings = [
-            "Обсуждались объемы поставки, график партий и логистические окна.",
-            "Выделены коммерческие условия: премия, дифференциал, ценовое окно, фрахт, демередж и инспекция.",
-            "Отдельно зафиксированы платежные условия, качество/инспекция, риски/демередж и хеджирование.",
-            "Задачи отделены от договоренностей и обещаний сторон; спорные элементы вынесены на ручную проверку.",
-        ]
         summary_type = "commercial_oil_gas"
-    elif label in {"technical_research", "education_consultation", "mixed"}:
-        key_findings = [
-            "Обсуждалась применимость модели и параметров к исследуемым кейсам.",
-            "Спорные технические выводы помечены как требующие проверки, а не как уверенные задачи.",
-            "Организационные договоренности и сроки выделены отдельно от физических параметров.",
-        ]
-        summary_type = label
-    elif label == "project_meeting":
-        key_findings = [
-            "Выделены поручения по проекту.",
-            "Определены вопросы, ответы, сроки и ответственные там, где это возможно.",
-            "Спорные элементы вынесены в блок ручной проверки.",
-        ]
-        summary_type = label
     else:
-        key_findings = ["Встреча обработана как общее обсуждение; уверенные действия отделены от исходных фрагментов."]
         summary_type = label
+    key_findings = [_summary_sentence(summary_type, topics, clean_tasks, clean_qa, result)]
+    if clean_tasks:
+        key_findings.append(f"Выделено задач/action items: {len(clean_tasks)}.")
+    if clean_qa:
+        key_findings.append(f"Выделено вопросов и ответов: {len(clean_qa)}.")
+    if result.get("clean_deadlines"):
+        key_findings.append(f"Выделено сроков: {len(result.get('clean_deadlines', []))}.")
 
     return {
         "meeting_type": summary_type,
         "meeting_type_confidence": meeting_type.get("confidence"),
         "main_topics": topics,
+        "summary_text": key_findings[0],
         "key_findings": key_findings,
         "action_items_count": len(clean_tasks),
         "questions_count": len(clean_qa),
@@ -1697,9 +3549,6 @@ def build_quality_metrics(result: dict) -> dict[str, Any]:
         "semantic_blocks_count": len(result.get("semantic_blocks", [])),
         "raw_tasks_count": len(result.get("tasks", [])),
         "clean_tasks_count": len(result.get("clean_tasks", [])),
-        "clean_research_actions_count": len(result.get("clean_research_actions", [])),
-        "clean_recommendations_count": len(result.get("clean_recommendations", [])),
-        "clean_research_notes_count": len(result.get("clean_research_notes", [])),
         "raw_questions_answers_count": len(result.get("questions_answers", [])),
         "clean_questions_answers_count": len(result.get("clean_questions_answers", [])),
         "agreements_count": len(result.get("agreements", [])),
@@ -1742,8 +3591,8 @@ def build_report_sections(result: dict) -> list[dict]:
             ("tasks", "Задачи", result.get("clean_tasks", []), 60, "cards", True),
             ("deadlines", "Дедлайны", result.get("clean_deadlines", []), 70, "cards", None),
             ("qa", "Вопросы и ответы", result.get("clean_questions_answers", []), 80, "cards", None),
-            ("aspects_topics", "Аспекты и темы", result.get("topics", []), 90, "summary", True),
-            ("sentiment", "Тональность", result.get("sentiment", []), 100, "summary", True),
+            ("aspects_topics", "Аспекты и темы", result.get("clean_topics", []), 90, "summary", True),
+            ("sentiment", "Тональность", result.get("clean_sentiment", []), 100, "summary", True),
             ("review", "Требует проверки", result.get("review_items", []), 120, "cards", True),
             ("processing_time", "Время обработки", [result.get("metadata", {}).get("processing_time", {})], 130, "summary", True),
             ("transcript", "Транскрипт", result.get("transcript", []), 140, "accordion", True),
@@ -1751,18 +3600,16 @@ def build_report_sections(result: dict) -> list[dict]:
         ]
     elif label in {"technical_research", "education_consultation"}:
         order = [
-            ("summary", "??????? ??????", result.get("analysis_summary"), 10, "summary", True),
-            ("research_actions", "????????????????? ????????", result.get("clean_research_actions", []), 20, "cards", True),
-            ("recommendations", "????????????", result.get("clean_recommendations", []), 30, "cards", True),
-            ("research_notes", "????????????????? ??????? / ??????????? ????????", result.get("clean_research_notes", []), 40, "cards", True),
-            ("qa", "??????? ? ??????", result.get("clean_questions_answers", []), 50, "cards", None),
-            ("deadlines", "???????? / ????????? ???????", result.get("clean_deadlines", []), 60, "cards", None),
-            ("aspects_topics", "???????? ???? ????????????", result.get("topics", []), 70, "summary", True),
-            ("review", "??????? ????????", result.get("review_items", []), 80, "cards", True),
-            ("sentiment", "???????????", result.get("sentiment", []), 90, "summary", True),
-            ("processing_time", "????? ?????????", [result.get("metadata", {}).get("processing_time", {})], 100, "summary", True),
-            ("transcript", "??????????", result.get("transcript", []), 110, "accordion", True),
-            ("raw", "???????? ??????????? ??????", [], 120, "accordion", True),
+            ("summary", "Краткая сводка", result.get("analysis_summary"), 10, "summary", True),
+            ("tasks", "Задачи", result.get("clean_tasks", []), 20, "cards", True),
+            ("qa", "Вопросы и ответы", result.get("clean_questions_answers", []), 30, "cards", None),
+            ("deadlines", "Дедлайны / следующая встреча", result.get("clean_deadlines", []), 40, "cards", None),
+            ("aspects_topics", "Аспекты и темы", result.get("clean_topics", []), 50, "summary", True),
+            ("review", "Требует проверки", result.get("review_items", []), 60, "cards", True),
+            ("sentiment", "Тональность", result.get("clean_sentiment", []), 70, "summary", True),
+            ("processing_time", "Время обработки", [result.get("metadata", {}).get("processing_time", {})], 80, "summary", True),
+            ("transcript", "Транскрипт", result.get("transcript", []), 90, "accordion", True),
+            ("raw", "Исходные извлеченные данные", [], 100, "accordion", True),
         ]
     elif label == "project_meeting":
         order = [
@@ -1772,8 +3619,8 @@ def build_report_sections(result: dict) -> list[dict]:
             ("deadlines", "Дедлайны", result.get("clean_deadlines", []), 40, "cards", None),
             ("responsibles", "Ответственные", result.get("clean_responsibles", []), 50, "table", None),
             ("decisions", "Решения", result.get("clean_decisions", []), 60, "cards", None),
-            ("aspects_topics", "Аспекты и темы", result.get("topics", []), 70, "summary", True),
-            ("sentiment", "Тональность", result.get("sentiment", []), 80, "summary", True),
+            ("aspects_topics", "Аспекты и темы", result.get("clean_topics", []), 70, "summary", True),
+            ("sentiment", "Тональность", result.get("clean_sentiment", []), 80, "summary", True),
             ("dynamic", "Динамика по серии встреч", [result.get("dynamic_analysis", {})], 90, "summary", True),
             ("review", "Требует проверки", result.get("review_items", []), 100, "cards", True),
             ("processing_time", "Время обработки", [result.get("metadata", {}).get("processing_time", {})], 110, "summary", True),
@@ -1787,7 +3634,7 @@ def build_report_sections(result: dict) -> list[dict]:
             ("qa", "Вопросы и ответы", result.get("clean_questions_answers", []), 30, "cards", None),
             ("agreements", "Договоренности / решения", result.get("clean_agreements", []) + result.get("clean_decisions", []), 40, "cards", None),
             ("deadlines", "Дедлайны", result.get("clean_deadlines", []), 50, "cards", None),
-            ("aspects_topics", "Аспекты и темы", result.get("topics", []), 60, "summary", True),
+            ("aspects_topics", "Аспекты и темы", result.get("clean_topics", []), 60, "summary", True),
             ("review", "Требует проверки", result.get("review_items", []), 70, "cards", True),
             ("transcript", "Транскрипт", result.get("transcript", []), 80, "accordion", True),
             ("raw", "Исходные извлеченные данные", [], 90, "accordion", True),
@@ -1824,9 +3671,9 @@ def normalize_analysis_result(result: dict) -> dict:
         clean_tasks = build_clean_tasks(result)
     clean_qa = build_clean_questions_answers(result)
     result["clean_tasks"] = clean_tasks
-    result["clean_research_actions"] = research_layers["actions"]
-    result["clean_recommendations"] = research_layers["recommendations"]
-    result["clean_research_notes"] = research_layers["notes"]
+    result["clean_research_actions"] = []
+    result["clean_recommendations"] = []
+    result["clean_research_notes"] = []
     result["clean_questions_answers"] = clean_qa
     result["clean_decisions"] = build_clean_decisions(result)
     result["clean_agreements"] = build_clean_agreements(result)
@@ -1835,6 +3682,12 @@ def normalize_analysis_result(result: dict) -> dict:
     result["clean_deadlines"] = build_clean_deadlines(result)
     result["clean_responsibles"] = build_clean_responsibles(result)
     result["clean_responsible_sides"] = build_clean_responsible_sides(result)
+    result["clean_topics"] = build_clean_topics(result)
+    result["clean_aspects"] = build_clean_aspects(result)
+    result["clean_sentiment"] = build_clean_sentiment(result)
+    result["clean_notes"] = []
+    result["sentiment_summary"] = build_sentiment_summary(result)
+    result["aspect_sentiment"] = build_aspect_sentiment(result)
     result["analysis_summary"] = build_analysis_summary(result, clean_tasks, clean_qa)
     result["review_warnings"] = build_review_warnings(result, clean_tasks, clean_qa)
     result["review_items"] = build_review_items(result) + research_layers["review_items"]

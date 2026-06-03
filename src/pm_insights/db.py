@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Integer, String, Text, create_engine, inspect, select, text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Integer, String, Text, create_engine, delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -308,6 +308,17 @@ def update_meeting_status(meeting_id: str, status: str) -> None:
             meeting.updated_at = datetime.now(timezone.utc)
 
 
+def update_meeting_metadata(meeting_id: str, metadata: dict[str, Any]) -> None:
+    init_db()
+    with session_scope() as session:
+        meeting = session.scalar(select(Meeting).where(Meeting.meeting_id == meeting_id))
+        if meeting:
+            current = dict(meeting.metadata_json or {})
+            current.update(metadata)
+            meeting.metadata_json = current
+            meeting.updated_at = datetime.now(timezone.utc)
+
+
 def get_meeting(meeting_id: str, user_id: int | None = None) -> dict | None:
     init_db()
     with session_scope() as session:
@@ -331,6 +342,24 @@ def list_meetings(user_id: int | None = None) -> list[dict]:
             query = query.where(Meeting.user_id == user_id)
         rows = session.scalars(query).all()
         return [serialize_meeting(row) for row in rows]
+
+
+def delete_meeting(meeting_id: str, user_id: int | None = None) -> bool:
+    init_db()
+    with session_scope() as session:
+        query = select(Meeting).where(Meeting.meeting_id == meeting_id)
+        if user_id is not None:
+            query = query.where(Meeting.user_id == user_id)
+        meeting = session.scalar(query)
+        if not meeting:
+            return False
+
+        session.execute(delete(AnalysisFeedback).where(AnalysisFeedback.meeting_id == meeting_id))
+        session.execute(delete(AnalysisResult).where(AnalysisResult.meeting_id == meeting_id))
+        session.execute(delete(Transcript).where(Transcript.meeting_id == meeting_id))
+        session.execute(delete(ProcessingLog).where(ProcessingLog.meeting_id == meeting_id))
+        session.delete(meeting)
+        return True
 
 
 def save_transcript(meeting_id: str, transcription: dict) -> None:

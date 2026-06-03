@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Spinner from '../components/Spinner';
 import api from '../lib/api';
@@ -26,7 +26,6 @@ export default function UploadPage() {
   const fileInputRef = useRef(null);
 
   const [consentAccepted, setConsentAccepted] = useState(false);
-  const [meetingTitle, setMeetingTitle] = useState('');
   const [projectName, setProjectName] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
   const [participantsText, setParticipantsText] = useState('');
@@ -38,6 +37,7 @@ export default function UploadPage() {
   const [uploadError, setUploadError] = useState('');
   const [analyzeStatus, setAnalyzeStatus] = useState('idle');
   const [analyzeError, setAnalyzeError] = useState('');
+  const [queuedTaskId, setQueuedTaskId] = useState('');
 
   const isUploading = uploadStatus === 'uploading';
   const isAnalyzing = analyzeStatus === 'analyzing';
@@ -45,13 +45,17 @@ export default function UploadPage() {
 
   const validateBeforeUpload = (file) => {
     if (!consentAccepted) return 'Подтвердите согласие на обработку данных.';
-    if (!meetingTitle.trim()) return 'Укажите название встречи.';
     if (!projectName.trim()) return 'Укажите проект или направление.';
-    if (!participantsText.trim()) return 'Укажите участников встречи и их роли.';
+    if (!meetingDate.trim()) return 'Укажите дату встречи.';
     if (!file) return 'Выберите аудиофайл.';
     if (!ALLOWED_EXTENSIONS.includes(getExtension(file.name))) return 'Поддерживаются только MP3, WAV и M4A.';
     if (file.size <= 0) return 'Пустой аудиофайл не может быть загружен.';
     return '';
+  };
+
+  const buildMeetingTitle = () => {
+    const project = projectName.trim();
+    return meetingDate ? `${project} — ${meetingDate}` : project;
   };
 
   const uploadSelectedFile = async (file) => {
@@ -72,7 +76,7 @@ export default function UploadPage() {
 
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('meeting_title', meetingTitle.trim());
+      formData.append('meeting_title', buildMeetingTitle());
       formData.append('project_name', projectName.trim());
       formData.append('meeting_date', meetingDate || '');
       formData.append('participants', participantsText.trim());
@@ -87,9 +91,14 @@ export default function UploadPage() {
       setUploadedMeetingId(meetingId);
       setUploadedFilename(payload.filename || payload.original_filename || file.name);
       setUploadStatus('uploaded');
-      setAnalyzeStatus('idle');
+      if (payload.status === 'queued') {
+        setQueuedTaskId(payload.task_id || '');
+        setAnalyzeStatus('analyzing');
+      } else {
+        setQueuedTaskId('');
+        setAnalyzeStatus('idle');
+      }
     } catch (error) {
-      console.error('Upload failed', error);
       setUploadStatus('error');
       setUploadError(`Не удалось загрузить файл: ${getApiErrorMessage(error)}`);
     }
@@ -133,11 +142,32 @@ export default function UploadPage() {
       await api.post(`/meetings/${uploadedMeetingId}/analyze`, null, { timeout: 3600000 });
       setAnalyzeStatus('completed');
     } catch (error) {
-      console.error('Analyze failed', error);
       setAnalyzeStatus('error');
       setAnalyzeError(`Не удалось запустить анализ: ${getApiErrorMessage(error)}`);
     }
   };
+
+  useEffect(() => {
+    if (!uploadedMeetingId || analyzeStatus !== 'analyzing') return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await api.get(`/meetings/${uploadedMeetingId}/status`);
+        const status = response.data?.status;
+        const jobStatus = response.data?.job_status;
+        if (status === 'completed' || jobStatus === 'success') {
+          setAnalyzeStatus('completed');
+          setAnalyzeError('');
+        }
+        if (status === 'failed' || jobStatus === 'failure') {
+          setAnalyzeStatus('error');
+          setAnalyzeError('Анализ завершился ошибкой. Проверьте файл или повторите запуск позже.');
+        }
+      } catch {
+        // Keep polling; transient backend/worker startup gaps are possible in async mode.
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [uploadedMeetingId, analyzeStatus]);
 
   return (
     <div className="max-w-2xl mx-auto mt-8">
@@ -167,17 +197,6 @@ export default function UploadPage() {
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <label className="space-y-1 text-sm text-gray-300">
-                <span>Название встречи</span>
-                <input
-                  value={meetingTitle}
-                  onChange={(event) => setMeetingTitle(event.target.value)}
-                  placeholder="Например: Еженедельная встреча по проекту"
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
-                  disabled={isBusy}
-                />
-              </label>
-
-              <label className="space-y-1 text-sm text-gray-300">
                 <span>Проект / направление</span>
                 <input
                   value={projectName}
@@ -188,7 +207,7 @@ export default function UploadPage() {
                 />
               </label>
 
-              <label className="space-y-1 text-sm text-gray-300 sm:col-span-2">
+              <label className="space-y-1 text-sm text-gray-300">
                 <span>Дата встречи</span>
                 <input
                   type="date"
@@ -236,7 +255,7 @@ export default function UploadPage() {
               />
 
               {uploadStatus === 'uploading' && <Spinner text="Файл загружается..." />}
-              {analyzeStatus === 'analyzing' && <Spinner text="Идёт анализ..." />}
+              {analyzeStatus === 'analyzing' && <Spinner text={queuedTaskId ? 'Файл принят в обработку...' : 'Идёт анализ...'} />}
 
               {!isBusy && uploadStatus !== 'uploaded' && analyzeStatus !== 'completed' && (
                 <div>
@@ -260,7 +279,7 @@ export default function UploadPage() {
               )}
             </div>
 
-            {uploadStatus === 'uploaded' && analyzeStatus !== 'completed' && uploadedMeetingId && (
+            {uploadStatus === 'uploaded' && analyzeStatus === 'idle' && uploadedMeetingId && (
               <button
                 type="button"
                 onClick={startAnalyze}
