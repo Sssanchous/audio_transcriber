@@ -650,12 +650,7 @@ def _dashboard_aspects(item: dict) -> Counter:
     return counter
 
 
-@app.get("/dashboard")
-@app.get("/api/dashboard")
-def dashboard(
-    current_user: dict | None = Depends(auth.maybe_current_user),
-    project: str | None = Query(None),
-) -> dict:
+def _build_dashboard_payload(current_user: dict | None, project: str | None) -> dict:
     try:
         user_id = _current_user_id(current_user)
         meetings_data = db.list_meetings(user_id=user_id)
@@ -779,7 +774,19 @@ def dashboard(
     }
 
 
+@app.get("/dashboard")
+@app.get("/api/dashboard")
+def dashboard(
+    current_user: dict | None = Depends(auth.maybe_current_user),
+    project: str | None = Query(None),
+) -> dict:
+    return _build_dashboard_payload(current_user, project)
+
+
 @app.get("/metrics")
 @app.get("/api/metrics")
-def metrics(current_user: dict | None = Depends(auth.maybe_current_user)) -> dict:
-    return dashboard(current_user)
+def metrics(
+    current_user: dict | None = Depends(auth.maybe_current_user),
+    project: str | None = Query(None),
+) -> dict:
+    return _build_dashboard_payload(current_user, project)
