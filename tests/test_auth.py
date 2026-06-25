@@ -5,6 +5,8 @@ from pm_insights.api.main import app
 
 
 def _use_sqlite_auth_db(tmp_path, monkeypatch):
+    from pm_insights.api import main as api_main
+
     monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite:///{tmp_path / 'auth.db'}")
     monkeypatch.setattr(settings, "JWT_SECRET_KEY", "test-secret")
     monkeypatch.setattr(settings, "REQUIRE_AUTH", True)
@@ -13,6 +15,7 @@ def _use_sqlite_auth_db(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "UPLOADS_DIR", uploads)
     monkeypatch.setattr(db, "_engine", None)
     monkeypatch.setattr(db, "SessionLocal", None)
+    monkeypatch.setattr(api_main, "_DASHBOARD_CACHE", {})
     db.init_db()
 
 

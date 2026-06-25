@@ -46,6 +46,7 @@ temp/
 
 # Бэкапы/дампы
 *.sql
+!schema.sql
 *.dump
 # ML models
 models/

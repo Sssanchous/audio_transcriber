@@ -162,6 +162,34 @@ TECHNICAL_WEAK_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+PERSON_IMPERATIVE_NO_PUNCT_RE = re.compile(rf"^\s*{NAME}\s+" + IMPERATIVE_RE.pattern, re.IGNORECASE)
+
+FUTURE_OBLIGATION_RE = re.compile(
+    r"\b(нужно|надо|необходимо|требуется)\s+будет\s+\w+|"
+    r"\bтребуется\s+(подготовить|проверить|добавить|разделить|описать|согласовать|сделать|"
+    r"прописать|указать|направить|отправить|подтвердить|предоставить|завершить|обеспечить)\b",
+    re.IGNORECASE,
+)
+
+PASSIVE_OBLIGATION_RE = re.compile(
+    r"\b(должно|должен|должна|должны)\s+быть\s+(готов\w*|сделан\w*|подготовлен\w*|"
+    r"завершен\w*|предоставлен\w*|отправлен\w*|выполнен\w*|согласован\w*)\b|"
+    r"\bследует\s+(завершить|подготовить|проверить|отправить|согласовать|предоставить|оформить|обновить|сделать)\b|"
+    r"\bнеобходимо\s+(предоставить|завершить|обеспечить)\b",
+    re.IGNORECASE,
+)
+
+DEADLINE_NEAR_VERB_RE = re.compile(
+    r"\b(к\s+(понедельнику|вторнику|среде|четвергу|пятнице|концу\s+(?:дня|недели|месяца)|релизу)|"
+    r"до\s+(конца\s+(?:дня|недели|месяца)|пятницы|завтра|понедельника|вторника|среды|четверга))"
+    r"\s+.{0,20}?\b(сдать|подготовить|отправить|завершить|закончить|доработать|прислать|"
+    r"оформить|предоставить|сделать|согласовать|проверить)\b|"
+    r"\b(сдать|подготовить|отправить|завершить|закончить|доработать|прислать|оформить|"
+    r"предоставить|сделать|согласовать|проверить)\s+.{0,20}?"
+    r"\b(к\s+(понедельнику|вторнику|среде|четвергу|пятнице)|до\s+(конца\s+(?:дня|недели|месяца)|пятницы|завтра))\b",
+    re.IGNORECASE,
+)
+
 
 def _words_count(text: str) -> int:
     return len(re.findall(r"[А-Яа-яЁёA-Za-z0-9]+", text or ""))
@@ -187,8 +215,15 @@ def is_real_task(text: str, technical_mode: bool | None = None) -> bool:
         return False
     if is_question(clean):
         return False
-    has_person_imperative = bool(PERSON_IMPERATIVE_RE.search(text or ""))
-    has_action_item = bool(ACTION_ITEM_RE.search(clean))
+    has_person_imperative = bool(PERSON_IMPERATIVE_RE.search(text or "")) or bool(
+        PERSON_IMPERATIVE_NO_PUNCT_RE.search(text or "")
+    )
+    has_action_item = (
+        bool(ACTION_ITEM_RE.search(clean))
+        or bool(FUTURE_OBLIGATION_RE.search(clean))
+        or bool(PASSIVE_OBLIGATION_RE.search(clean))
+        or bool(DEADLINE_NEAR_VERB_RE.search(clean))
+    )
     has_org_action = bool(ORG_ACTION_RE.search(clean))
     has_action_pattern = any(pattern in lower for pattern in TASK_ACTION_PATTERNS)
     has_imperative = bool(IMPERATIVE_RE.search(clean))
@@ -244,7 +279,7 @@ def extract_tasks(fragments: list[dict], participants: list[str] | None = None) 
             continue
         seen.add(key)
         deadlines = find_deadlines(text)
-        responsibles = find_responsibles(text, participants=participants)
+        responsibles = find_responsibles(text, participants=participants, assume_task=True)
         tasks.append(
             {
                 "text": text,
@@ -261,3 +296,23 @@ def extract_tasks(fragments: list[dict], participants: list[str] | None = None) 
             }
         )
     return tasks
+
+
+RUBERT_ANSWER_REMOVE_THRESHOLD = 0.75
+RUBERT_OTHER_REMOVE_THRESHOLD = 0.80
+
+
+def filter_tasks_by_classifier_confidence(tasks: list[dict]) -> list[dict]:
+    kept = []
+    for task in tasks:
+        label = task.get("classifier_label")
+        confidence = task.get("classifier_confidence")
+        if label == "task" or confidence is None:
+            kept.append(task)
+            continue
+        if label == "answer" and confidence >= RUBERT_ANSWER_REMOVE_THRESHOLD:
+            continue
+        if label == "other" and confidence >= RUBERT_OTHER_REMOVE_THRESHOLD:
+            continue
+        kept.append(task)
+    return kept

@@ -14,6 +14,7 @@ from pm_insights.dataset.segmenter import split_long_text
 from pm_insights.nlp.aspects import extract_aspects
 from pm_insights.nlp.deadline_extractor import extract_deadlines
 from pm_insights.nlp.decision_extractor import extract_agreements, extract_decisions
+from pm_insights.nlp.fragment_classifier import score_fragment_confidence
 from pm_insights.nlp.meeting_type import detect_meeting_type
 from pm_insights.nlp.qa_extractor import extract_qa_pairs
 from pm_insights.nlp.postprocessing import normalize_analysis_result
@@ -52,6 +53,24 @@ def _segments_from_transcription(transcription: dict) -> list[dict]:
                 }
             )
     return fragments
+
+
+def _enrich_tasks_with_confidence(tasks: list[dict], qa_pairs: list[dict]) -> None:
+    for task in tasks:
+        task.update(score_fragment_confidence(task.get("text", ""), "task"))
+
+    for pair in qa_pairs:
+        classifier_result = score_fragment_confidence(pair.get("question", ""), "question")
+        pair["classifier_label"] = classifier_result["classifier_label"]
+        pair["classifier_confidence"] = classifier_result["classifier_confidence"]
+        pair["needs_review"] = classifier_result["needs_review"]
+
+        answer_text = pair.get("answer")
+        if answer_text:
+            answer_classifier_result = score_fragment_confidence(answer_text, "answer")
+            pair["answer_classifier_label"] = answer_classifier_result["classifier_label"]
+            pair["answer_classifier_confidence"] = answer_classifier_result["classifier_confidence"]
+            pair["needs_review"] = pair["needs_review"] or answer_classifier_result["needs_review"]
 
 
 def _merge_items_by_text(*collections: list[dict]) -> list[dict]:
@@ -118,6 +137,7 @@ def analyze_meeting(
         deadlines = _merge_items_by_text(extract_deadlines(fragments), extract_deadlines(analysis_units))
         responsibles = extract_responsibles(fragments, participants=participant_name_items)
         aspects = extract_aspects(analysis_units)
+        _enrich_tasks_with_confidence(tasks, qa_pairs)
         nlp_seconds = time.perf_counter() - nlp_start
 
         topic_start = time.perf_counter()
@@ -198,6 +218,8 @@ def analyze_meeting(
             "message": "Проверьте результаты. Исправления будут использованы для будущего дообучения модели.",
         }
         result = normalize_analysis_result(result)
+        # Mark so request-time reads (dashboard, /result) can skip re-normalizing.
+        result["is_normalized"] = True
         result["metrics"] = calculate_metrics(result)
         result["metrics"]["processing_time"] = processing_time
 

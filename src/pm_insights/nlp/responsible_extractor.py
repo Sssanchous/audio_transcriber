@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from .entities import extract_entities
 
@@ -130,7 +131,11 @@ def _leading_name_before_imperative(
     return None
 
 
-def find_responsibles(text: str, participants: list[str] | None = None) -> list[str]:
+def find_responsibles(
+    text: str,
+    participants: list[str] | None = None,
+    assume_task: bool = False,
+) -> list[str]:
     text = text or ""
     names: list[str] = []
     entities = extract_entities(text)
@@ -148,7 +153,13 @@ def find_responsibles(text: str, participants: list[str] | None = None) -> list[
     elif len(leading) == 1:
         parts = re.split(r"[,.:;]\s*", text, maxsplit=1)
         tail = parts[1] if len(parts) > 1 else ""
-        if IMPERATIVE_RE.search(tail) or ANSWER_SELF_RE.search(tail) or re.search(r"\bза\b.+\bотвечаю\s+я\b", tail, re.IGNORECASE):
+        is_capitalized_name = leading[0][:1].isupper()
+        if (
+            IMPERATIVE_RE.search(tail)
+            or ANSWER_SELF_RE.search(tail)
+            or re.search(r"\bза\b.+\bотвечаю\s+я\b", tail, re.IGNORECASE)
+            or (assume_task and is_capitalized_name)
+        ):
             names.append(_canonical_name(leading[0], participants))
 
     patterns = [
@@ -172,11 +183,39 @@ def find_responsibles(text: str, participants: list[str] | None = None) -> list[
     return sorted({name for name in names if _is_valid_person(name, participants, ner_people)})
 
 
+OPENING_PARTICIPANTS_HEAD_RATIO = 0.1
+FREQUENT_RESPONSIBLE_THRESHOLD = 3
+CONFIDENCE_BASE = 0.7
+CONFIDENCE_BOOSTED = 0.9
+
+
+def infer_opening_participants(
+    fragments: list[dict],
+    head_ratio: float = OPENING_PARTICIPANTS_HEAD_RATIO,
+) -> list[str]:
+    if not fragments:
+        return []
+    head_count = max(1, round(len(fragments) * head_ratio))
+    names: set[str] = set()
+    for fragment in fragments[:head_count]:
+        text = fragment.get("text", "")
+        names.update(extract_entities(text).get("people", []))
+    return sorted(names)
+
+
 def extract_responsibles(fragments: list[dict], participants: list[str] | None = None) -> list[dict]:
-    result = []
+    merged_participants = sorted({*(participants or []), *infer_opening_participants(fragments)})
+
+    rows = []
     for fragment in fragments:
         text = fragment.get("text", "")
-        names = find_responsibles(text, participants=participants)
+        names = find_responsibles(text, participants=merged_participants)
         if names:
-            result.append({"text": text, "responsibles": names, "source_fragment": fragment.get("fragment_index")})
+            rows.append({"text": text, "responsibles": names, "source_fragment": fragment.get("fragment_index")})
+
+    name_counts = Counter(name for row in rows for name in row["responsibles"])
+    result = []
+    for row in rows:
+        boosted = any(name_counts[name] > FREQUENT_RESPONSIBLE_THRESHOLD for name in row["responsibles"])
+        result.append({**row, "confidence": CONFIDENCE_BOOSTED if boosted else CONFIDENCE_BASE})
     return result

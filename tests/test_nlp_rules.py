@@ -224,12 +224,48 @@ def test_qa_splits_multiple_questions_and_keeps_answer_short():
 
     pairs = extract_qa_pairs(
         [
-            frag("Это подтвержденный объем или может измениться? Одной партией или несколькими?", 1),
+            frag(
+                "Это подтвержденный итоговый объем поставки или он может измениться? "
+                "Будет одна крупная партия или несколько отдельных?",
+                1,
+            ),
             frag("Да, июльский объем подтвержден, разбивка идет тремя партиями по 60 тысяч тонн.", 2),
-            frag("Какой потолок по демереджу?", 3),
+            frag("Какой итоговый потолок установлен по демереджу в контракте?", 3),
         ]
     )
     assert len(pairs) == 3
     assert [pair["status"] for pair in pairs[:2]] == ["answered", "answered"]
     assert pairs[2]["status"] == "not_answered"
-    assert all("Это подтвержденный объем" not in (pair["answer"] or "") for pair in pairs[:2])
+    assert all("Это подтвержденный итоговый объем" not in (pair["answer"] or "") for pair in pairs[:2])
+
+
+def test_qa_min_length_filter_drops_short_question():
+    pairs = extract_qa_pairs(
+        [
+            frag("Когда мы отправим?", 1),
+            frag("Да, отправим документы клиенту завтра утром после согласования.", 2),
+        ]
+    )
+    assert pairs == []
+
+
+def test_qa_same_speaker_continuation_is_not_paired():
+    pairs = extract_qa_pairs(
+        [
+            frag("Возможно мы успеем закончить эту задачу в срок?", 1),
+            frag("Возможно стоит обсудить это позже на следующей неделе", 2),
+        ]
+    )
+    assert pairs == []
+
+
+def test_qa_low_confidence_question_without_mark_is_skipped(monkeypatch):
+    import pm_insights.nlp.qa_extractor as qa_extractor_module
+
+    monkeypatch.setattr(
+        qa_extractor_module,
+        "score_fragment_confidence",
+        lambda text, label: {"classifier_label": "question", "classifier_confidence": 0.2, "needs_review": True},
+    )
+    pairs = extract_qa_pairs([frag("Подскажите пожалуйста по срокам поставки оборудования", 1)])
+    assert pairs == []

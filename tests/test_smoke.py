@@ -431,7 +431,8 @@ def test_dashboard_project_summary_payload(monkeypatch):
     from pm_insights.api import main as api_main
 
     monkeypatch.setattr(api_main.settings, "REQUIRE_AUTH", False)
-    monkeypatch.setattr(api_main.db, "list_meetings", lambda user_id=None: [])
+    monkeypatch.setattr(api_main.db, "list_meetings_with_results", lambda user_id=None: [])
+    monkeypatch.setattr(api_main, "_DASHBOARD_CACHE", {})
     response = TestClient(app).get("/dashboard")
     assert response.status_code == 200
     payload = response.json()
@@ -581,8 +582,9 @@ def test_dynamic_repeated_aspects_uses_clean_quality_gate(monkeypatch):
         "topics": [{"topic_name": "Диаметр интересно случайный", "keywords": ["диаметр", "граф", "топология"], "count": 1}],
         "aspects": [],
     }
-    monkeypatch.setattr(api_main.db, "list_meetings", lambda user_id=None: [{"meeting_id": "prev", "meeting_key": "series"}, {"meeting_id": "current", "meeting_key": "series"}])
-    monkeypatch.setattr(api_main.db, "get_meeting", lambda meeting_id, user_id=None: previous if meeting_id == "prev" else current)
+    monkeypatch.setattr(api_main.db, "list_meetings_with_results", lambda user_id=None: [previous, current])
+    monkeypatch.setattr(api_main, "_DYNAMIC_ANALYSIS_CACHE", {})
+    monkeypatch.setattr(api_main, "_NORMALIZED_RESULT_CACHE", {})
 
     dynamic = api_main._dynamic_analysis_for_result(current, user_id=None)
 
@@ -618,8 +620,9 @@ def test_dynamic_repeated_aspects_uses_clean_raspberry_topics(monkeypatch):
     }
     previous = dict(base, meeting_id="prev")
     current = dict(base, meeting_id="current")
-    monkeypatch.setattr(api_main.db, "list_meetings", lambda user_id=None: [{"meeting_id": "prev", "meeting_key": "raspberry-series"}, {"meeting_id": "current", "meeting_key": "raspberry-series"}])
-    monkeypatch.setattr(api_main.db, "get_meeting", lambda meeting_id, user_id=None: previous if meeting_id == "prev" else current)
+    monkeypatch.setattr(api_main.db, "list_meetings_with_results", lambda user_id=None: [previous, current])
+    monkeypatch.setattr(api_main, "_DYNAMIC_ANALYSIS_CACHE", {})
+    monkeypatch.setattr(api_main, "_NORMALIZED_RESULT_CACHE", {})
 
     dynamic = api_main._dynamic_analysis_for_result(current, user_id=None)
     repeated = {topic.lower() for topic in dynamic["repeated_topics"]}

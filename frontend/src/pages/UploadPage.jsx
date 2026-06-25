@@ -4,6 +4,8 @@ import Spinner from '../components/Spinner';
 import api from '../lib/api';
 
 const ALLOWED_EXTENSIONS = ['.mp3', '.wav', '.m4a'];
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_STATUS_POLL_ATTEMPTS = 60;
 
 function getExtension(name) {
   const dot = name.lastIndexOf('.');
@@ -50,6 +52,7 @@ export default function UploadPage() {
     if (!file) return 'Выберите аудиофайл.';
     if (!ALLOWED_EXTENSIONS.includes(getExtension(file.name))) return 'Поддерживаются только MP3, WAV и M4A.';
     if (file.size <= 0) return 'Пустой аудиофайл не может быть загружен.';
+    if (file.size > MAX_FILE_SIZE_BYTES) return 'Файл превышает максимальный размер 2 ГБ.';
     return '';
   };
 
@@ -149,7 +152,9 @@ export default function UploadPage() {
 
   useEffect(() => {
     if (!uploadedMeetingId || analyzeStatus !== 'analyzing') return undefined;
+    let attempts = 0;
     const timer = window.setInterval(async () => {
+      attempts += 1;
       try {
         const response = await api.get(`/meetings/${uploadedMeetingId}/status`);
         const status = response.data?.status;
@@ -157,13 +162,19 @@ export default function UploadPage() {
         if (status === 'completed' || jobStatus === 'success') {
           setAnalyzeStatus('completed');
           setAnalyzeError('');
+          return;
         }
         if (status === 'failed' || jobStatus === 'failure') {
           setAnalyzeStatus('error');
           setAnalyzeError('Анализ завершился ошибкой. Проверьте файл или повторите запуск позже.');
+          return;
         }
       } catch {
-        // Keep polling; transient backend/worker startup gaps are possible in async mode.
+        // transient backend/worker startup gaps are possible in async mode, keep polling
+      }
+      if (attempts >= MAX_STATUS_POLL_ATTEMPTS) {
+        setAnalyzeStatus('error');
+        setAnalyzeError('Не удалось получить статус анализа за отведённое время. Попробуйте обновить страницу позже.');
       }
     }, 3000);
     return () => window.clearInterval(timer);
@@ -254,10 +265,17 @@ export default function UploadPage() {
                 onChange={handleFileChange}
               />
 
+              {selectedFile && analyzeStatus !== 'completed' && (
+                <div className="text-sm mb-3">
+                  <p className="text-white font-medium">{selectedFile.name}</p>
+                  <p className="text-gray-400 mt-1">{(selectedFile.size / 1024 / 1024).toFixed(2)} МБ</p>
+                </div>
+              )}
+
               {uploadStatus === 'uploading' && <Spinner text="Файл загружается..." />}
               {analyzeStatus === 'analyzing' && <Spinner text={queuedTaskId ? 'Файл принят в обработку...' : 'Идёт анализ...'} />}
 
-              {!isBusy && uploadStatus !== 'uploaded' && analyzeStatus !== 'completed' && (
+              {!isBusy && uploadStatus !== 'uploaded' && analyzeStatus !== 'completed' && !selectedFile && (
                 <div>
                   <p className="text-gray-300">Выберите готовый аудиофайл или перетащите его сюда</p>
                   <p className="text-gray-500 text-xs mt-2">MP3, WAV, M4A</p>
@@ -265,10 +283,7 @@ export default function UploadPage() {
               )}
 
               {!isBusy && uploadStatus === 'uploaded' && selectedFile && (
-                <div>
-                  <p className="text-white font-medium">Файл загружен: {uploadedFilename || selectedFile.name}</p>
-                  <p className="text-gray-400 text-sm mt-1">{(selectedFile.size / 1024 / 1024).toFixed(2)} МБ</p>
-                </div>
+                <p className="text-emerald-400 text-sm">Файл загружен: {uploadedFilename || selectedFile.name}</p>
               )}
 
               {!isBusy && analyzeStatus === 'completed' && (

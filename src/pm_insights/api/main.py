@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -340,13 +341,15 @@ def meeting_status(meeting_id: str, current_user: dict | None = Depends(auth.may
         raise HTTPException(404, "Meeting not found")
     metadata = meeting.get("metadata") or {}
     status = meeting.get("processing_status") or "unknown"
-    public_status = "success" if status == "completed" else "failure" if status in {"failed", "failure"} else status
+    is_failed = status in {"failed", "failure"}
+    public_status = "success" if status == "completed" else "failure" if is_failed else status
     return {
         "meeting_id": meeting_id,
         "status": status,
         "job_status": public_status,
         "task_id": metadata.get("async_task_id"),
         "result_ready": status == "completed",
+        "error_message": db.get_last_processing_error(meeting_id) if is_failed else None,
     }
 
 
@@ -374,18 +377,44 @@ def delete_meeting(meeting_id: str, current_user: dict | None = Depends(auth.may
     return {"status": "deleted", "meeting_id": meeting_id}
 
 
+_NORMALIZED_RESULT_CACHE: dict[str, tuple[float, dict]] = {}
+NORMALIZED_RESULT_CACHE_TTL_SECONDS = 60
+
+
+def _get_normalized_result(meeting_id: str | None, result: dict) -> dict:
+    # Results saved by the current pipeline already carry is_normalized=True
+    # (normalize_analysis_result() ran once at write-time) - just use them as-is.
+    if result.get("is_normalized"):
+        return result
+
+    # Older meetings predating that marker: normalize on-the-fly and cache it,
+    # shared between /result and /dashboard so neither re-pays this per request.
+    cached = _NORMALIZED_RESULT_CACHE.get(meeting_id) if meeting_id else None
+    if cached is not None and (time.monotonic() - cached[0]) < NORMALIZED_RESULT_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    normalized = normalize_analysis_result(result)
+    if meeting_id:
+        _NORMALIZED_RESULT_CACHE[meeting_id] = (time.monotonic(), normalized)
+    return normalized
+
+
 @app.get("/meetings/{meeting_id}/result")
 @app.get("/api/meetings/{meeting_id}/result")
 def meeting_result(meeting_id: str, current_user: dict | None = Depends(auth.maybe_current_user)) -> dict:
     try:
+        # Re-checked on every request (cheap) so the cache below can never bypass
+        # the per-user ownership check that get_result() enforces.
         result = db.get_result(meeting_id, user_id=_current_user_id(current_user))
     except Exception as exc:
         raise _db_error(exc) from exc
     if not result:
         raise HTTPException(404, "Meeting result not found")
-    result = normalize_analysis_result(result)
-    result["dynamic_analysis"] = _dynamic_analysis_for_result(result, _current_user_id(current_user))
-    return result
+
+    normalized = _get_normalized_result(meeting_id, result)
+    payload = dict(normalized)
+    payload["dynamic_analysis"] = _dynamic_analysis_for_result(payload, _current_user_id(current_user))
+    return payload
 
 
 @app.post("/meetings/{meeting_id}/feedback")
@@ -436,15 +465,29 @@ def list_meeting_feedback(meeting_id: str, current_user: dict = Depends(auth.get
         raise _db_error(exc) from exc
 
 
+_DYNAMIC_ANALYSIS_CACHE: dict[tuple[str | None, int | None], tuple[float, dict]] = {}
+DYNAMIC_ANALYSIS_CACHE_TTL_SECONDS = 60
+
+
 def _dynamic_analysis_for_result(result: dict, user_id: int | None) -> dict:
+    cache_key = (result.get("meeting_id"), user_id)
+    cached = _DYNAMIC_ANALYSIS_CACHE.get(cache_key)
+    if cached is not None and (time.monotonic() - cached[0]) < DYNAMIC_ANALYSIS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    payload = _compute_dynamic_analysis_for_result(result, user_id)
+    _DYNAMIC_ANALYSIS_CACHE[cache_key] = (time.monotonic(), payload)
+    return payload
+
+
+def _compute_dynamic_analysis_for_result(result: dict, user_id: int | None) -> dict:
     metadata = result.get("metadata") or {}
     meeting_info = metadata.get("meeting_info") or {}
     key = meeting_info.get("meeting_key") or result.get("meeting_key")
     if not key:
         return {"available": False, "message": "Для этой серии встреч пока нет истории для динамического анализа."}
     try:
-        meetings_data = [item for item in db.list_meetings(user_id=user_id) if (item.get("meeting_key") == key)]
-        completed = [db.get_meeting(item["meeting_id"], user_id=user_id) or item for item in meetings_data]
+        completed = [item for item in db.list_meetings_with_results(user_id=user_id) if item.get("meeting_key") == key]
         completed = [item for item in completed if item.get("metrics")]
     except Exception:
         completed = []
@@ -457,7 +500,7 @@ def _dynamic_analysis_for_result(result: dict, user_id: int | None) -> dict:
     last_metrics = last.get("metrics", {})
     topic_counts: Counter = Counter()
     for item in completed:
-        normalized_item = normalize_analysis_result(dict(item))
+        normalized_item = _get_normalized_result(item.get("meeting_id"), item)
         for topic in normalized_item.get("clean_topics") or []:
             name = topic.get("topic_name") or topic.get("title")
             if name:
@@ -636,29 +679,48 @@ def _dashboard_sentiment(item: dict) -> tuple[float, int, int, int]:
 
 
 def _dashboard_aspects(item: dict) -> Counter:
+    # `item` is already normalize_analysis_result() output by the time this is called
+    # from _compute_dashboard_payload() - re-normalizing here would double the NLP cost.
     stopwords = {"и", "в", "на", "по", "для", "это", "как", "что", "нет", "да", "встреча"}
     counter: Counter = Counter()
-    normalized = normalize_analysis_result(dict(item))
-    for topic in normalized.get("clean_topics") or []:
+    for topic in item.get("clean_topics") or []:
         name = str(topic.get("topic_name") or topic.get("title") or "").strip().lower()
         if name and name not in stopwords:
             counter[name] += int(topic.get("count") or 1)
-    for aspect in normalized.get("clean_aspects") or []:
+    for aspect in item.get("clean_aspects") or []:
         name = str(aspect.get("title") or aspect.get("name") or "").strip().lower()
         if name and name not in stopwords:
             counter[name] += int(aspect.get("count") or 1)
     return counter
 
 
+_DASHBOARD_CACHE: dict[tuple[int | None, str | None], tuple[float, dict]] = {}
+DASHBOARD_CACHE_TTL_SECONDS = 60
+
+
 def _build_dashboard_payload(current_user: dict | None, project: str | None) -> dict:
+    user_id = _current_user_id(current_user)
+    cache_key = (user_id, project)
+    cached = _DASHBOARD_CACHE.get(cache_key)
+    if cached is not None and (time.monotonic() - cached[0]) < DASHBOARD_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    payload = _compute_dashboard_payload(user_id, project)
+    _DASHBOARD_CACHE[cache_key] = (time.monotonic(), payload)
+    return payload
+
+
+def _compute_dashboard_payload(user_id: int | None, project: str | None) -> dict:
     try:
-        user_id = _current_user_id(current_user)
-        meetings_data = db.list_meetings(user_id=user_id)
-        enriched = [db.get_meeting(item["meeting_id"], user_id=user_id) or item for item in meetings_data]
+        enriched = db.list_meetings_with_results(user_id=user_id)
     except Exception as exc:
         raise _db_error(exc) from exc
 
-    normalized_results = [normalize_analysis_result(item) for item in enriched if item.get("metrics") or item.get("report_sections")]
+    normalized_results = [
+        _get_normalized_result(item.get("meeting_id"), item)
+        for item in enriched
+        if item.get("metrics") or item.get("report_sections")
+    ]
     projects_map: dict[str, dict] = {}
     for item in enriched:
         project_name = _project_value(item)
@@ -758,8 +820,8 @@ def _build_dashboard_payload(current_user: dict | None, project: str | None) -> 
             "average_estimated_1h_processing_minutes": average_1h,
         },
         # Backward-compatible fields used by older tests and archive widgets.
-        "meetings_count": len(meetings_data),
-        "completed_count": sum(1 for item in meetings_data if item.get("processing_status") == "completed"),
+        "meetings_count": len(enriched),
+        "completed_count": sum(1 for item in enriched if item.get("processing_status") == "completed"),
         "tasks_count": total_tasks,
         "questions_count": questions_count,
         "answers_count": answers_count,

@@ -15,11 +15,32 @@ NORMALIZATION_REPLACEMENTS = [
     (re.compile(r"\bчетверг\s+именно\b", re.IGNORECASE), "четверг"),
 ]
 
+LEADING_FILLER_RE = re.compile(
+    r"^\s*(?:ну|вот|это\s+самое|как\s+бы|значит|короче)\b[\s,]*",
+    re.IGNORECASE,
+)
+
+TRAILING_MIDWORD_CUTOFF_RE = re.compile(r"\s+\S*-\s*$")
+
+
+def _strip_leading_fillers(value: str) -> str:
+    while True:
+        stripped = LEADING_FILLER_RE.sub("", value)
+        if stripped == value:
+            return value
+        value = stripped
+
 
 def normalize_text_for_nlp(text: str) -> str:
     value = text or ""
     value = re.sub(r"\s+", " ", value).strip()
-    value = re.sub(r"\b(\w+)(?:\s+\1\b){2,}", r"\1", value, flags=re.IGNORECASE)
+    value = _strip_leading_fillers(value)
+    value = re.sub(r"\b(\w+)(?:\s+\1\b)+", r"\1", value, flags=re.IGNORECASE)
+    value = TRAILING_MIDWORD_CUTOFF_RE.sub("", value)
+    value = re.sub(r"([.,!?;:])\1+", r"\1", value)
+    value = re.sub(r"[.,]{2,}", ".", value)
+    value = re.sub(r"\s+([,.!?;:])", r"\1", value)
+    value = value.strip()
     for pattern, replacement in NORMALIZATION_REPLACEMENTS:
         value = pattern.sub(replacement, value)
     if re.search(r"\b(параметр|модель|формул|коэффициент|значени|X|Y)\b", value, re.IGNORECASE):

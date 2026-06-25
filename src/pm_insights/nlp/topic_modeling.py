@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from pathlib import Path
 from typing import Any
 
 from pm_insights import settings
@@ -78,13 +77,6 @@ OIL_GAS_TOPIC_KEYWORDS = {
     "хеджирование": ["хедж", "фьючерс", "своп", "форвард", "кривая", "basis risk"],
     "комплаенс": ["судно", "страховка", "санкционные ограничения", "флаг", "порт"],
     "инспекция": ["инспектор", "sgs", "проба", "коносамент", "shore tank", "инспекция"],
-}
-
-DOMAIN_TOPIC_LABELS = {
-    "ценовая формула": {"брент", "brent", "премия", "дифференциал", "формула"},
-    "релиз": {"релиз", "сборка", "сервер", "деплой", "frontend", "backend"},
-    "параметры пласта": {"скин", "пласт", "проницаемость", "дебит", "скважина"},
-    "платежные условия": {"оплата", "отсрочка", "гарантия", "аккредитив", "предоплата"},
 }
 
 DOMAIN_TEXT_LABELS = {

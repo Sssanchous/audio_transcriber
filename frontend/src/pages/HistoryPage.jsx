@@ -2,8 +2,34 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
-import Spinner from '../components/Spinner';
 import ErrorMessage from '../components/ErrorMessage';
+
+function HistorySkeleton() {
+  return (
+    <div className="max-w-6xl mx-auto mt-8 space-y-6 animate-pulse">
+      <div className="space-y-2">
+        <div className="h-7 w-48 bg-gray-800 rounded" />
+        <div className="h-4 w-80 bg-gray-800 rounded" />
+      </div>
+      <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+        <div className="h-10 bg-gray-800 rounded-lg" />
+      </div>
+      <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800">
+          <div className="h-4 w-full bg-gray-800 rounded" />
+        </div>
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div key={index} className="px-4 py-4 border-b border-gray-800/50 flex gap-4">
+            <div className="h-4 flex-1 bg-gray-800 rounded" />
+            <div className="h-4 w-24 bg-gray-800 rounded" />
+            <div className="h-4 w-24 bg-gray-800 rounded" />
+            <div className="h-4 w-20 bg-gray-800 rounded" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function filenameFromDisposition(disposition, fallback) {
   const match = disposition?.match(/filename="?([^";]+)"?/i);
@@ -19,9 +45,12 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+const PAGE_SIZE = 10;
+
 export default function HistoryPage() {
   const [meetings, setMeetings] = useState([]);
   const [filter, setFilter] = useState('');
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [downloadError, setDownloadError] = useState('');
@@ -65,13 +94,16 @@ export default function HistoryPage() {
     }
   };
 
-  if (loading) return <Spinner />;
+  if (loading) return <HistorySkeleton />;
   if (error) return <ErrorMessage message={error} onRetry={load} />;
 
   const filteredMeetings = meetings.filter((meeting) => {
     const haystack = `${meeting.meeting_title || ''} ${meeting.project_name || ''} ${meeting.original_filename || ''}`.toLowerCase();
     return haystack.includes(filter.toLowerCase());
   });
+  const totalPages = Math.max(1, Math.ceil(filteredMeetings.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pagedMeetings = filteredMeetings.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
   return (
     <div className="max-w-6xl mx-auto mt-8 space-y-6">
@@ -94,7 +126,7 @@ export default function HistoryPage() {
       <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
         <input
           value={filter}
-          onChange={(event) => setFilter(event.target.value)}
+          onChange={(event) => { setFilter(event.target.value); setPage(1); }}
           className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white"
           placeholder="Фильтр по названию встречи, проекту или файлу"
         />
@@ -116,7 +148,7 @@ export default function HistoryPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredMeetings.map((meeting) => (
+              {pagedMeetings.map((meeting) => (
                 <tr key={meeting.meeting_id} className="border-b border-gray-800/50">
                   <td className="px-4 py-3">
                     <Link className="text-indigo-400 hover:text-indigo-300" to={`/result/${meeting.meeting_id}`}>
@@ -148,6 +180,27 @@ export default function HistoryPage() {
               ))}
             </tbody>
           </table>
+        )}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-800 text-sm text-gray-400">
+            <button
+              type="button"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              className="px-3 py-1.5 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Назад
+            </button>
+            <span>Страница {currentPage} из {totalPages}</span>
+            <button
+              type="button"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+              className="px-3 py-1.5 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Далее
+            </button>
+          </div>
         )}
       </div>
     </div>

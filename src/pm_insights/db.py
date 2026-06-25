@@ -344,6 +344,34 @@ def list_meetings(user_id: int | None = None) -> list[dict]:
         return [serialize_meeting(row) for row in rows]
 
 
+def list_meetings_with_results(user_id: int | None = None) -> list[dict]:
+    """Like list_meetings(), but also batches in the latest analysis result per
+    meeting using a single extra query instead of one get_meeting() call per row."""
+    init_db()
+    with session_scope() as session:
+        query = select(Meeting).order_by(Meeting.created_at.desc())
+        if user_id is not None:
+            query = query.where(Meeting.user_id == user_id)
+        meetings = session.scalars(query).all()
+        if not meetings:
+            return []
+
+        meeting_ids = [meeting.meeting_id for meeting in meetings]
+        result_rows = session.scalars(
+            select(AnalysisResult)
+            .where(AnalysisResult.meeting_id.in_(meeting_ids))
+            .order_by(AnalysisResult.meeting_id, AnalysisResult.id.desc())
+        ).all()
+        latest_result_by_meeting: dict[str, dict] = {}
+        for row in result_rows:
+            latest_result_by_meeting.setdefault(row.meeting_id, row.result_json)
+
+        return [
+            serialize_meeting(meeting, latest_result_by_meeting.get(meeting.meeting_id))
+            for meeting in meetings
+        ]
+
+
 def delete_meeting(meeting_id: str, user_id: int | None = None) -> bool:
     init_db()
     with session_scope() as session:
@@ -482,6 +510,17 @@ def log_processing(meeting_id: str, step: str, status: str, message: str = "") -
             session.add(ProcessingLog(meeting_id=meeting_id, step=step, status=status, message=message[:1000]))
     except Exception:
         pass
+
+
+def get_last_processing_error(meeting_id: str) -> str | None:
+    init_db()
+    with session_scope() as session:
+        log = session.scalar(
+            select(ProcessingLog)
+            .where(ProcessingLog.meeting_id == meeting_id, ProcessingLog.status.in_(["failed", "failure"]))
+            .order_by(ProcessingLog.id.desc())
+        )
+        return log.message if log and log.message else None
 
 
 def serialize_user(user: User) -> dict:

@@ -85,6 +85,11 @@ function compactText(text, limit = 220) {
   return `${clean.slice(0, limit).trim()}...`;
 }
 
+function formatDelta(value) {
+  const num = Number(value || 0);
+  return num > 0 ? `+${num}` : `${num}`;
+}
+
 function formatSeconds(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   const total = Number(value);
@@ -258,33 +263,77 @@ function uniqueResponsibleSides(result) {
   return Array.from(sides);
 }
 
+const RETRY_DELAY_MS = 5000;
+
 export default function ResultPage() {
   const { id } = useParams();
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [meetingFailed, setMeetingFailed] = useState(false);
+  const [autoRetried, setAutoRetried] = useState(false);
   const [exportError, setExportError] = useState('');
   const [reviewMode, setReviewMode] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [copyMessage, setCopyMessage] = useState('');
+  const [correctionsCount, setCorrectionsCount] = useState(0);
+
+  useEffect(() => {
+    api.get(`/meetings/${id}/feedback`)
+      .then((response) => setCorrectionsCount(Array.isArray(response.data) ? response.data.length : 0))
+      .catch(() => setCorrectionsCount(0));
+  }, [id]);
 
   const fetchResult = () => {
     setLoading(true);
     setError('');
+    setMeetingFailed(false);
     api.get(`/meetings/${id}/result`)
       .then((response) => setResult(response.data))
-      .catch((err) => setError(err.response?.data?.detail || 'Результат ещё не готов'))
+      .catch(async (err) => {
+        let message = err.response?.data?.detail || 'Результат ещё не готов';
+        try {
+          const statusResponse = await api.get(`/meetings/${id}/status`);
+          const statusData = statusResponse.data || {};
+          if (statusData.status === 'failed' || statusData.job_status === 'failure') {
+            setMeetingFailed(true);
+            message = statusData.error_message
+              ? `Обработка встречи завершилась ошибкой: ${statusData.error_message}`
+              : 'Обработка встречи завершилась ошибкой. Подробности недоступны.';
+          } else {
+            message = 'Результат ещё не готов. Повторная попытка через 5 секунд...';
+          }
+        } catch {
+          // status check itself failed - keep the generic message above
+        }
+        setError(message);
+      })
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchResult(); }, [id]);
+  useEffect(() => { setAutoRetried(false); fetchResult(); }, [id]);
+
+  useEffect(() => {
+    if (!error || meetingFailed || autoRetried) return undefined;
+    const timer = window.setTimeout(() => {
+      setAutoRetried(true);
+      fetchResult();
+    }, RETRY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [error, meetingFailed, autoRetried]);
 
   const transcriptText = useMemo(
     () => (result?.transcript || []).map((segment) => segment.text).filter(Boolean).join(' '),
     [result],
   );
 
+  const retryNow = () => {
+    setAutoRetried(false);
+    fetchResult();
+  };
+
   if (loading) return <Spinner />;
-  if (error) return <ErrorMessage message={error} onRetry={fetchResult} />;
+  if (error) return <ErrorMessage message={error} onRetry={retryNow} />;
   if (!result) return null;
 
   const metrics = result.metrics || {};
@@ -321,7 +370,13 @@ export default function ResultPage() {
   };
 
   const copyTranscript = async () => {
-    await navigator.clipboard.writeText(transcriptText);
+    setCopyMessage('');
+    try {
+      await navigator.clipboard.writeText(transcriptText);
+      setCopyMessage('Транскрипт скопирован в буфер обмена.');
+    } catch {
+      setCopyMessage('Не удалось скопировать транскрипт. Скопируйте текст вручную.');
+    }
   };
 
   const submitFeedback = async (itemType, item, action) => {
@@ -350,7 +405,8 @@ export default function ResultPage() {
           keywords: item.keywords,
         },
       });
-      setFeedbackMessage('Исправление сохранено как разметка для будущего безопасного дообучения.');
+      setCorrectionsCount((count) => count + 1);
+      setFeedbackMessage('Исправления сохранены. Они будут учтены при следующем обучении модели.');
     } catch (err) {
       setFeedbackMessage(err.response?.data?.detail || 'Не удалось сохранить исправление.');
     }
@@ -374,13 +430,18 @@ export default function ResultPage() {
           <button type="button" onClick={() => downloadReport('xlsx')} className="px-3 py-2 rounded-lg bg-gray-950 text-white hover:bg-gray-800">Скачать Excel</button>
           <button type="button" onClick={() => downloadReport('docx')} className="px-3 py-2 rounded-lg bg-gray-950 text-white hover:bg-gray-800">Скачать Word</button>
           <button type="button" onClick={() => setReviewMode((value) => !value)} className="px-3 py-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">
-            {reviewMode ? 'Выключить режим проверки' : 'Режим проверки'}
+            {reviewMode
+              ? 'Выключить режим проверки'
+              : correctionsCount > 0
+                ? `Режим проверки (${correctionsCount} исправлено)`
+                : 'Режим проверки'}
           </button>
           <Link to="/history" className="px-3 py-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">Архив</Link>
         </div>
       </div>
 
       {exportError && <div className="bg-red-950/20 border border-red-900/60 rounded-xl p-3 text-sm text-red-200">{exportError}</div>}
+      {copyMessage && <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 text-sm text-gray-300">{copyMessage}</div>}
       {reviewMode && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-sm text-gray-300">
           Исправления будут сохранены как разметка и могут использоваться для будущего дообучения модели. Модель не переобучается автоматически.
@@ -441,7 +502,7 @@ export default function ResultPage() {
                 )}
               </div>
             )} />
-          ) : <Empty text="Выделенные задачи не найдены." />}
+          ) : <Empty text="Задачи не обнаружены" />}
       </Section>
 
       <Section title="Вопросы и ответы">
@@ -472,7 +533,7 @@ export default function ResultPage() {
               )}
             </div>
           )} />
-        ) : <Empty />}
+        ) : <Empty text="Вопросы и ответы не обнаружены в транскрипте" />}
       </Section>
 
       <Section title="Ответственные и сроки">
@@ -605,8 +666,10 @@ export default function ResultPage() {
         {dynamic.available ? (
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
             <MetricCard label="Предыдущих встреч" value={dynamic.previous_meetings_count} />
-            <MetricCard label="Δ задач" value={dynamic.tasks_delta} />
-            <MetricCard label="Δ среднего тона" value={dynamic.average_sentiment_delta} />
+            <MetricCard label="Δ задач" value={formatDelta(dynamic.tasks_delta)} />
+            <MetricCard label="Δ вопросов" value={formatDelta(dynamic.questions_delta)} />
+            <MetricCard label="Δ негативных фрагментов" value={formatDelta(dynamic.negative_fragments_delta)} />
+            <MetricCard label="Δ среднего тона" value={formatDelta(dynamic.average_sentiment_delta)} />
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
               <p className="text-gray-400 text-xs">Повторяющиеся аспекты</p>
               <p className="text-white text-sm mt-2">{(dynamic.repeated_topics || []).join(', ') || dynamic.repeated_topics_message || 'Повторяющиеся аспекты не определены.'}</p>
@@ -627,12 +690,19 @@ export default function ResultPage() {
       </Section>
 
       <Section title="Транскрипт">
-        <button type="button" onClick={copyTranscript} className="px-3 py-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">
-          Скопировать полный транскрипт
-        </button>
-        <div className="bg-gray-950/50 border border-gray-800 rounded-lg p-4 text-gray-200 text-sm leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto">
-          {transcriptText || transcriptPreview || 'Нет данных'}
-        </div>
+        {transcriptText ? (
+          <button type="button" onClick={copyTranscript} className="px-3 py-2 rounded-lg bg-gray-800 text-gray-200 hover:bg-gray-700">
+            Скопировать полный транскрипт
+          </button>
+        ) : (
+          <Empty text="Транскрипт недоступен — распознавание речи не вернуло текст" />
+        )}
+        {transcriptText && (
+          <div className="bg-gray-950/50 border border-gray-800 rounded-lg p-4 text-gray-200 text-sm leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto">
+            {transcriptPreview}
+          </div>
+        )}
+        {transcriptText && (
         <Details title="Показать сегменты с таймкодами">
           <div className="space-y-2">
             {(result.transcript || []).map((segment, index) => (
@@ -643,6 +713,7 @@ export default function ResultPage() {
             ))}
           </div>
         </Details>
+        )}
       </Section>
     </div>
   );

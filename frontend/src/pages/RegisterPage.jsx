@@ -7,6 +7,7 @@ export default function RegisterPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
+  const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
@@ -21,7 +22,7 @@ export default function RegisterPage() {
     }
     setLoading(true);
     try {
-      await register({ email: email.trim(), username: username.trim(), password });
+      await register({ email: email.trim(), username: username.trim(), password, fullName: fullName.trim() });
       navigate('/upload');
     } catch (err) {
       setError(err.response?.data?.detail || 'Не удалось зарегистрироваться.');
@@ -39,6 +40,16 @@ export default function RegisterPage() {
         </div>
 
         {error && <div className="text-sm text-red-300 bg-red-950/40 border border-red-800 rounded-md p-3">{error}</div>}
+
+        <label className="block">
+          <span className="block text-sm text-gray-300 mb-1.5">Полное имя</span>
+          <input
+            value={fullName}
+            onChange={(event) => setFullName(event.target.value)}
+            className="w-full bg-gray-950 border border-gray-700 rounded-md px-3 py-2 text-white"
+            autoComplete="name"
+          />
+        </label>
 
         <label className="block">
           <span className="block text-sm text-gray-300 mb-1.5">Email</span>

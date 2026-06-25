@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
+from typing import Any
+
+from .fragment_classifier import score_fragment_confidence
 
 
 KNOWN_SPEAKERS = "Алексей|Анна|Иван|Мария|Илья|Ольга|Дмитрий|Сергей|Екатерина|Павел|Николай"
@@ -27,6 +31,46 @@ ANSWER_RE = re.compile(
     r"стабильно|ошибок\s+нет|готова|готов|для\s+этого|в\s+таком\s+случае|это\s+означает)\b",
     re.IGNORECASE,
 )
+
+
+SIMILARITY_PREFERENCE_THRESHOLD = 0.3
+
+
+@lru_cache(maxsize=1)
+def _load_qa_embedding_model() -> Any | None:
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        from pm_insights import settings
+
+        return SentenceTransformer(settings.TOPIC_EMBEDDING_MODEL)
+    except Exception:
+        return None
+
+
+def _cosine_similarity(vec_a: Any, vec_b: Any) -> float:
+    try:
+        numerator = float(sum(float(a) * float(b) for a, b in zip(vec_a, vec_b, strict=False)))
+        norm_a = sum(float(a) * float(a) for a in vec_a) ** 0.5
+        norm_b = sum(float(b) * float(b) for b in vec_b) ** 0.5
+        if not norm_a or not norm_b:
+            return 0.0
+        return numerator / (norm_a * norm_b)
+    except Exception:
+        return 0.0
+
+
+def _question_answer_similarity(question: str, candidate: str) -> float:
+    if not question or not candidate:
+        return 0.0
+    model = _load_qa_embedding_model()
+    if model is None:
+        return 0.0
+    try:
+        embeddings = model.encode([question, candidate], show_progress_bar=False)
+        return _cosine_similarity(embeddings[0], embeddings[1])
+    except Exception:
+        return 0.0
 
 
 def strip_speaker_prefix(text: str) -> str:
@@ -87,6 +131,31 @@ def _is_plausible_answer(candidate_text: str) -> bool:
     return _words_count(clean) >= 5 and not QUESTION_STOP_RE.search(clean)
 
 
+MIN_QUESTION_WORDS = 5
+LOW_CONFIDENCE_QUESTION_THRESHOLD = 0.55
+SHORT_FRAGMENT_WORDS = 8
+
+
+def _shares_leading_word(text_a: str, text_b: str) -> bool:
+    words_a = text_a.split()
+    words_b = text_b.split()
+    return bool(words_a and words_b and words_a[0].lower() == words_b[0].lower())
+
+
+def _likely_same_speaker_continuation(question_text: str, next_text: str) -> bool:
+    if not next_text:
+        return False
+    if SPEAKER_PREFIX_RE.search(next_text) or is_answer(next_text):
+        return False
+    q_clean = strip_speaker_prefix(question_text).strip()
+    n_clean = strip_speaker_prefix(next_text).strip()
+    if not q_clean or not n_clean:
+        return False
+    if _shares_leading_word(q_clean, n_clean):
+        return True
+    return _words_count(q_clean) < SHORT_FRAGMENT_WORDS and _words_count(n_clean) < SHORT_FRAGMENT_WORDS
+
+
 def _trim_answer(answer: str | None, limit: int = 1000) -> tuple[str | None, bool]:
     if not answer or len(answer) <= limit:
         return answer, False
@@ -105,27 +174,48 @@ def extract_qa_pairs(fragments: list[dict], max_gap: int = 5) -> list[dict]:
         if not questions:
             continue
 
-        answer_parts: list[str] = []
-        answer_fragments: list[int] = []
-        status = "not_answered"
+        next_text = fragments[index + 1].get("text", "") if index + 1 < len(fragments) else ""
+        same_speaker_continuation = _likely_same_speaker_continuation(text, next_text)
+
+        window: list[tuple[int, dict]] = []
         for offset in range(1, max_gap + 1):
             if index + offset >= len(fragments):
                 break
             candidate = fragments[index + offset]
-            candidate_text = candidate.get("text", "")
-            if is_question(candidate_text):
+            if is_question(candidate.get("text", "")):
                 break
-            if _is_plausible_answer(candidate_text):
-                answer_parts.append(candidate_text)
-                answer_fragments.append(candidate.get("fragment_index") or candidate.get("block_index"))
-                status = "answered" if is_answer(candidate_text) else "partial"
-                if is_answer(candidate_text):
-                    # A direct answer can be extended with one nearby explanatory
-                    # fragment, but should not absorb a whole discussion.
+            window.append((offset, candidate))
+
+        plausible = [
+            (offset, candidate) for offset, candidate in window if _is_plausible_answer(candidate.get("text", ""))
+        ]
+
+        start_at = None
+        if plausible:
+            start_at = plausible[0][0]
+            best_score = _question_answer_similarity(text, plausible[0][1].get("text", ""))
+            for offset, candidate in plausible[1:]:
+                score = _question_answer_similarity(text, candidate.get("text", ""))
+                if score > SIMILARITY_PREFERENCE_THRESHOLD and score > best_score:
+                    start_at, best_score = offset, score
+
+        answer_parts: list[str] = []
+        answer_fragments: list[int] = []
+        status = "not_answered"
+        if start_at is not None:
+            for offset, candidate in window:
+                if offset < start_at:
                     continue
-                break
-            elif answer_parts:
-                break
+                candidate_text = candidate.get("text", "")
+                if _is_plausible_answer(candidate_text):
+                    answer_parts.append(candidate_text)
+                    answer_fragments.append(candidate.get("fragment_index") or candidate.get("block_index"))
+                    status = "answered" if is_answer(candidate_text) else "partial"
+                    if is_answer(candidate_text):
+                        continue
+                    break
+                elif answer_parts:
+                    break
 
         answer_text = " ".join(part for part in answer_parts if part).strip() or None
         answer_text, was_trimmed = _trim_answer(answer_text)
@@ -133,6 +223,13 @@ def extract_qa_pairs(fragments: list[dict], max_gap: int = 5) -> list[dict]:
             status = "partial"
 
         for question in questions:
+            if _words_count(question) < MIN_QUESTION_WORDS:
+                continue
+            if same_speaker_continuation:
+                continue
+            confidence_signal = score_fragment_confidence(question, "question")
+            if (confidence_signal.get("classifier_confidence") or 0.0) < LOW_CONFIDENCE_QUESTION_THRESHOLD and "?" not in question:
+                continue
             pairs.append(
                 {
                     "question": question,

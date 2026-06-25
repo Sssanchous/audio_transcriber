@@ -5,15 +5,20 @@ from collections import Counter
 from typing import Any
 
 from pm_insights import settings
+from pm_insights.utils.logging import get_logger
 
 from .deadline_extractor import classify_deadline_kind, find_deadlines
 from .decision_extractor import extract_agreements
 from .extraction_decision import build_review_items, score_task_candidate
+from .fragment_classifier import score_fragment_confidence
 from .meeting_type import detect_meeting_type
 from .responsible_extractor import find_responsibles
 from .responsible_side import find_responsible_side
-from .task_extractor import is_real_task
+from .task_extractor import filter_tasks_by_classifier_confidence, is_real_task
 from .topic_modeling import DOMAIN_TEXT_LABELS, STOPWORDS as TOPIC_MODEL_STOPWORDS, TOPIC_CANDIDATE_LABELS
+
+
+log = get_logger(__name__)
 
 
 TECHNICAL_TOPICS = {
@@ -1106,7 +1111,7 @@ def _semantic_embedding_model() -> Any | None:
         _SEMANTIC_MODEL_UNAVAILABLE = True
         return None
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
+        from sentence_transformers import SentenceTransformer
 
         kwargs = {}
         try:
@@ -2399,9 +2404,13 @@ def build_clean_research_layers(result: dict) -> dict[str, list[dict]]:
             _research_item(title, title, None, confidence=0.64, review_required=True, kind="research_action"),
         )
 
+    synthetic_actions = []
     for item in _synthetic_research_actions(result):
         if _is_bad_clean_task(item.get("title"), item.get("source_text")):
             continue
+        item.update(score_fragment_confidence(item.get("source_text", ""), "task"))
+        synthetic_actions.append(item)
+    for item in filter_tasks_by_classifier_confidence(synthetic_actions):
         add_unique(actions, seen_actions, item)
 
     generated_recommendations = []
@@ -3653,7 +3662,52 @@ def build_display_config(result: dict) -> dict:
     }
 
 
+def _normalize_dedup_text(text: str | None) -> str:
+    return re.sub(r"\s+", " ", (text or "").lower()).strip(" .,:;?!")
+
+
+def _answer_matches_task_text(answer_text: str | None, task_texts: list[str]) -> bool:
+    answer_norm = _normalize_dedup_text(answer_text)
+    if not answer_norm:
+        return False
+    for task_text in task_texts:
+        if answer_norm == task_text:
+            return True
+        shorter, longer = sorted([answer_norm, task_text], key=len)
+        if len(shorter.split()) >= 8 and shorter in longer:
+            return True
+    return False
+
+
+def _drop_qa_overlapping_with_tasks(clean_tasks: list[dict], clean_qa: list[dict]) -> list[dict]:
+    task_fragments = {item.get("source_fragment") for item in clean_tasks if item.get("source_fragment") is not None}
+    task_texts = [
+        normalized
+        for item in clean_tasks
+        for normalized in [_normalize_dedup_text(item.get("source_text"))]
+        if normalized
+    ]
+    if not task_fragments and not task_texts:
+        return clean_qa
+
+    deduped: list[dict] = []
+    removed = 0
+    for qa_item in clean_qa:
+        answer_fragments = set((qa_item.get("source_fragments") or [])[1:])
+        answer_text = qa_item.get("answer_full") or qa_item.get("answer")
+        if (answer_fragments & task_fragments) or _answer_matches_task_text(answer_text, task_texts):
+            removed += 1
+            continue
+        deduped.append(qa_item)
+
+    if removed:
+        log.info("Removed %d clean_questions_answers entries overlapping with clean_tasks fragments", removed)
+    return deduped
+
+
 def normalize_analysis_result(result: dict) -> dict:
+    if result.get("tasks"):
+        result["tasks"] = filter_tasks_by_classifier_confidence(result["tasks"])
     if "meeting_type" not in result:
         result["meeting_type"] = detect_meeting_type(result.get("semantic_blocks") or result.get("transcript", []))
     _normalize_meeting_type(result)
@@ -3670,6 +3724,7 @@ def normalize_analysis_result(result: dict) -> dict:
     else:
         clean_tasks = build_clean_tasks(result)
     clean_qa = build_clean_questions_answers(result)
+    clean_qa = _drop_qa_overlapping_with_tasks(clean_tasks, clean_qa)
     result["clean_tasks"] = clean_tasks
     result["clean_research_actions"] = []
     result["clean_recommendations"] = []

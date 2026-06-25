@@ -55,7 +55,7 @@ def _load_baseline_model() -> Any:
 @lru_cache(maxsize=1)
 def _load_rubert_classifier() -> Any:
     try:
-        from transformers import pipeline  # type: ignore
+        from transformers import pipeline
     except Exception as exc:
         raise RuntimeError(
             "RuBERT fragment classifier requires optional dependencies from requirements-ml.txt "
@@ -149,3 +149,21 @@ def classify_fragments(fragments: list[dict], engine: str | None = None) -> list
             }
         )
     return rows
+
+
+LOW_CONFIDENCE_THRESHOLD = 0.60
+
+
+def score_fragment_confidence(text: str, rule_label: str, engine: str | None = None) -> dict[str, object]:
+    try:
+        prediction = classify_fragment(text or "", engine=engine or "rubert")
+    except Exception:
+        return {"classifier_label": None, "classifier_confidence": None, "needs_review": False}
+
+    confidence = float(prediction.get("confidence") or 0.0)
+    classifier_label = prediction.get("label")
+    return {
+        "classifier_label": classifier_label,
+        "classifier_confidence": round(confidence, 4),
+        "needs_review": confidence < LOW_CONFIDENCE_THRESHOLD,
+    }
