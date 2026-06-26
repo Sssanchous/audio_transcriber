@@ -10,15 +10,13 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from pm_insights import db  # noqa: E402
-from pm_insights.nlp.postprocessing import normalize_analysis_result  # noqa: E402
+from pm_insights import db
+from pm_insights.nlp.postprocessing import normalize_analysis_result
 
 
 def _latest_result_rows(session):
-    """One AnalysisResult row per meeting_id: the most recent one, matching what
-    get_meeting() / list_meetings_with_results() actually read at request time."""
     rows = session.scalars(
         select(db.AnalysisResult).order_by(db.AnalysisResult.meeting_id, db.AnalysisResult.id.desc())
     ).all()

@@ -345,8 +345,6 @@ def list_meetings(user_id: int | None = None) -> list[dict]:
 
 
 def list_meetings_with_results(user_id: int | None = None) -> list[dict]:
-    """Like list_meetings(), but also batches in the latest analysis result per
-    meeting using a single extra query instead of one get_meeting() call per row."""
     init_db()
     with session_scope() as session:
         query = select(Meeting).order_by(Meeting.created_at.desc())

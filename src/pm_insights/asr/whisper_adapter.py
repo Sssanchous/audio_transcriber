@@ -14,8 +14,6 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
 
 class WhisperAdapter(BaseTranscriber):
-    """Local faster-whisper adapter. The model is loaded lazily on first use."""
-
     def __init__(
         self,
         model_name: str | None = None,

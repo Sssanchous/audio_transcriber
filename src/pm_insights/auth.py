@@ -14,12 +14,12 @@ from pm_insights import db, settings
 
 try:
     from passlib.context import CryptContext
-except Exception:  # pragma: no cover - optional dependency
+except Exception:
     CryptContext = None
 
 try:
     from jose import JWTError, jwt
-except Exception:  # pragma: no cover - optional dependency
+except Exception:
     JWTError = Exception
     jwt = None
 

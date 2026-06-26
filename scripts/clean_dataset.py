@@ -1,13 +1,3 @@
-"""Resolve pm_dataset/protocol_structured label conflicts, drop low-confidence
-needs_review rows, top up under-represented classes with synthetic examples,
-and re-split into train/val/test with zero cross-split text leakage.
-
-Usage: python scripts/clean_dataset.py
-Inputs:  datasets/training_dataset_fixed.jsonl
-Outputs: datasets/training_dataset_clean.jsonl, train_clean.jsonl, val_clean.jsonl,
-         test_clean.jsonl, clean_dataset_report.json
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -34,10 +24,6 @@ REPORT_PATH = DATASETS_DIR / "clean_dataset_report.json"
 
 ALLOWED_LABELS = ("task", "question", "answer", "other")
 
-# Sources with no `metadata.confidence` field that we nonetheless trust by
-# default (treated as confidence=PROTECTED_CONFIDENCE_FLOOR). manual_examples
-# is hand-curated synthetic training data with a deliberately fixed label, so
-# a missing confidence score does not mean "low quality".
 TRUSTED_SOURCES = {"manual_examples"}
 
 NEEDS_REVIEW_CONFIDENCE_FLOOR = 0.75
@@ -48,11 +34,6 @@ IMBALANCE_THRESHOLD_PP = 5.0
 
 SPLIT_RATIOS = (0.80, 0.10, 0.10)
 SPLIT_SEED = 42
-
-
-# --------------------------------------------------------------------------- #
-# IO helpers
-# --------------------------------------------------------------------------- #
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -75,17 +56,11 @@ def normalize_text(text: str) -> str:
     return t
 
 
-# --------------------------------------------------------------------------- #
-# Confidence / review helpers
-# --------------------------------------------------------------------------- #
-
-
 def confidence(row: dict) -> float | None:
     return row.get("metadata", {}).get("confidence")
 
 
 def effective_confidence(row: dict) -> float | None:
-    """Real confidence if present, else PROTECTED_CONFIDENCE_FLOOR for trusted sources."""
     c = confidence(row)
     if c is not None:
         return c
@@ -101,11 +76,6 @@ def needs_review(row: dict) -> bool:
 def is_protected(row: dict) -> bool:
     c = effective_confidence(row)
     return row.get("source") in TRUSTED_SOURCES and c is not None and c >= PROTECTED_CONFIDENCE_FLOOR
-
-
-# --------------------------------------------------------------------------- #
-# Step 1: duplicate / conflicting-label resolution
-# --------------------------------------------------------------------------- #
 
 
 def resolve_duplicates(rows: list[dict]) -> tuple[list[dict], dict]:
@@ -146,11 +116,6 @@ def resolve_duplicates(rows: list[dict]) -> tuple[list[dict], dict]:
     return kept, stats
 
 
-# --------------------------------------------------------------------------- #
-# Step 2: needs_review / low-confidence filter
-# --------------------------------------------------------------------------- #
-
-
 def filter_needs_review(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     def should_drop(row: dict) -> bool:
         if is_protected(row):
@@ -165,16 +130,11 @@ def filter_needs_review(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, dropped
 
 
-# --------------------------------------------------------------------------- #
-# Step 3: synthetic balancing (only triggered if a class is >5pp below target)
-# --------------------------------------------------------------------------- #
-
 NAMES = [
     "Анна", "Дмитрий", "Сергей", "Мария", "Павел", "Ольга",
     "Игорь", "Татьяна", "Алексей", "Наталья", "Виктор", "Елена",
 ]
 
-# Kept in accusative case so they drop cleanly into "сделать/завершить/проверить/за ..." slots.
 TOPICS = [
     "миграцию базы данных", "интеграцию с CRM", "тестовое покрытие API",
     "документацию для заказчика", "ревью дизайна интерфейса", "настройку CI/CD",
@@ -302,11 +262,6 @@ def balance_classes(
     return rows + added_rows, synthetic_added
 
 
-# --------------------------------------------------------------------------- #
-# Step 4: stratified re-split, 80/10/10, zero cross-split text overlap
-# --------------------------------------------------------------------------- #
-
-
 def stratified_split(rows: list[dict], seed: int, ratios: tuple[float, float, float]) -> tuple[list[dict], list[dict], list[dict]]:
     rng = random.Random(seed)
     by_label: dict[str, list[dict]] = defaultdict(list)
@@ -331,11 +286,6 @@ def stratified_split(rows: list[dict], seed: int, ratios: tuple[float, float, fl
     rng.shuffle(val)
     rng.shuffle(test)
     return train, val, test
-
-
-# --------------------------------------------------------------------------- #
-# Stats helpers
-# --------------------------------------------------------------------------- #
 
 
 def label_distribution(rows: list[dict]) -> dict[str, dict]:
@@ -363,11 +313,6 @@ def normalized_overlap(a: list[dict], b: list[dict]) -> int:
     na = {normalize_text(r["text"]) for r in a}
     nb = {normalize_text(r["text"]) for r in b}
     return len(na & nb)
-
-
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

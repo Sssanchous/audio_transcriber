@@ -304,7 +304,7 @@ export default function ResultPage() {
             message = 'Результат ещё не готов. Повторная попытка через 5 секунд...';
           }
         } catch {
-          // status check itself failed - keep the generic message above
+          // ignore fetch error, keep generic message
         }
         setError(message);
       })

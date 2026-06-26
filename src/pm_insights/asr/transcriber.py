@@ -9,8 +9,6 @@ from .whisper_adapter import WhisperAdapter
 
 
 class StubTranscriber(BaseTranscriber):
-    """Test-only fallback. Production flow should use WhisperAdapter."""
-
     def __init__(self, fallback_text: str | None = None) -> None:
         self.fallback_text = fallback_text or (
             "Транскрибация не выполнена: передайте transcript_text для теста или подключите Whisper."

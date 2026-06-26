@@ -382,13 +382,9 @@ NORMALIZED_RESULT_CACHE_TTL_SECONDS = 60
 
 
 def _get_normalized_result(meeting_id: str | None, result: dict) -> dict:
-    # Results saved by the current pipeline already carry is_normalized=True
-    # (normalize_analysis_result() ran once at write-time) - just use them as-is.
     if result.get("is_normalized"):
         return result
 
-    # Older meetings predating that marker: normalize on-the-fly and cache it,
-    # shared between /result and /dashboard so neither re-pays this per request.
     cached = _NORMALIZED_RESULT_CACHE.get(meeting_id) if meeting_id else None
     if cached is not None and (time.monotonic() - cached[0]) < NORMALIZED_RESULT_CACHE_TTL_SECONDS:
         return cached[1]
@@ -403,8 +399,6 @@ def _get_normalized_result(meeting_id: str | None, result: dict) -> dict:
 @app.get("/api/meetings/{meeting_id}/result")
 def meeting_result(meeting_id: str, current_user: dict | None = Depends(auth.maybe_current_user)) -> dict:
     try:
-        # Re-checked on every request (cheap) so the cache below can never bypass
-        # the per-user ownership check that get_result() enforces.
         result = db.get_result(meeting_id, user_id=_current_user_id(current_user))
     except Exception as exc:
         raise _db_error(exc) from exc
@@ -679,8 +673,6 @@ def _dashboard_sentiment(item: dict) -> tuple[float, int, int, int]:
 
 
 def _dashboard_aspects(item: dict) -> Counter:
-    # `item` is already normalize_analysis_result() output by the time this is called
-    # from _compute_dashboard_payload() - re-normalizing here would double the NLP cost.
     stopwords = {"и", "в", "на", "по", "для", "это", "как", "что", "нет", "да", "встреча"}
     counter: Counter = Counter()
     for topic in item.get("clean_topics") or []:
@@ -819,7 +811,6 @@ def _compute_dashboard_payload(user_id: int | None, project: str | None) -> dict
             "average_processing_time_seconds": average_processing,
             "average_estimated_1h_processing_minutes": average_1h,
         },
-        # Backward-compatible fields used by older tests and archive widgets.
         "meetings_count": len(enriched),
         "completed_count": sum(1 for item in enriched if item.get("processing_status") == "completed"),
         "tasks_count": total_tasks,

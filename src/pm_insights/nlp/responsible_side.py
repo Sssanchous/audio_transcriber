@@ -41,14 +41,10 @@ def _normalize(text: str) -> str:
 
 
 def find_responsible_side(text: str) -> str | None:
-    """Extract a contractual side when no person-level diarization exists."""
-
     clean = _normalize(text)
     if not clean:
         return None
 
-    # More specific shared-responsibility signals should win before generic
-    # "стороны" matches.
     for side in ("каждая сторона", "обе стороны", "покупатель", "поставщик"):
         if any(pattern in clean for pattern in SIDE_PATTERNS[side]):
             return side

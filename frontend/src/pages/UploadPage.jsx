@@ -170,7 +170,7 @@ export default function UploadPage() {
           return;
         }
       } catch {
-        // transient backend/worker startup gaps are possible in async mode, keep polling
+        // ignore transient errors, keep polling
       }
       if (attempts >= MAX_STATUS_POLL_ATTEMPTS) {
         setAnalyzeStatus('error');

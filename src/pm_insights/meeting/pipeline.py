@@ -218,7 +218,6 @@ def analyze_meeting(
             "message": "Проверьте результаты. Исправления будут использованы для будущего дообучения модели.",
         }
         result = normalize_analysis_result(result)
-        # Mark so request-time reads (dashboard, /result) can skip re-normalizing.
         result["is_normalized"] = True
         result["metrics"] = calculate_metrics(result)
         result["metrics"]["processing_time"] = processing_time
